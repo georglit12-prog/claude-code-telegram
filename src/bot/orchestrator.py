@@ -91,6 +91,50 @@ def _redact_secrets(text: str) -> str:
     return result
 
 
+# Что показывать вместо технических названий инструментов.
+# Человеку важно «читает файл», а не «Read».
+_TOOL_LABELS: Dict[str, str] = {
+    "Read": "читает",
+    "Write": "пишет",
+    "Edit": "правит",
+    "MultiEdit": "правит",
+    "NotebookRead": "читает блокнот",
+    "NotebookEdit": "правит блокнот",
+    "Bash": "выполняет",
+    "Glob": "ищет файлы",
+    "Grep": "ищет в коде",
+    "LS": "смотрит папку",
+    "Task": "думает",
+    "TaskOutput": "думает",
+    "WebFetch": "смотрит в интернете",
+    "WebSearch": "ищет в интернете",
+    "TodoRead": "смотрит план",
+    "TodoWrite": "составляет план",
+    "Skill": "применяет навык",
+}
+
+
+def _tool_label(name: str) -> str:
+    """Понятное человеку действие вместо имени инструмента."""
+    return _TOOL_LABELS.get(name, name)
+
+
+# Кадры «живого» индикатора: меняются на каждом обновлении сообщения,
+# поэтому сразу видно, что бот не завис.
+_SPINNER = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+
+
+def _human_elapsed(seconds: float) -> str:
+    """Время работы словами: 8 сек, 1 мин 20 сек, 3 мин."""
+    total = int(seconds)
+    if total < 60:
+        return f"{total} сек"
+    minutes, rest = divmod(total, 60)
+    if rest == 0:
+        return f"{minutes} мин"
+    return f"{minutes} мин {rest} сек"
+
+
 # Tool name -> friendly emoji mapping for verbose output
 _TOOL_ICONS: Dict[str, str] = {
     "Read": "\U0001f4d6",
@@ -392,6 +436,14 @@ class MessageOrchestrator:
             )
         )
 
+        # Кнопки интерфейса (проекты, модель, режим, глубина, статус)
+        app.add_handler(
+            CallbackQueryHandler(
+                self._inject_deps(self._handle_ui_callback),
+                pattern=r"^ui:",
+            )
+        )
+
         # Only cd: callbacks (for project selection), scoped by pattern
         app.add_handler(
             CallbackQueryHandler(
@@ -496,6 +548,216 @@ class MessageOrchestrator:
 
     # --- Agentic handlers ---
 
+    # ------------------------------------------------------------------
+    # Кнопки под сообщениями
+    # ------------------------------------------------------------------
+
+    def _main_keyboard(self) -> InlineKeyboardMarkup:
+        """Главные кнопки: то, что нужно чаще всего."""
+        return InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("📁 Проекты", callback_data="ui:repos"),
+                    InlineKeyboardButton("✨ Новый проект", callback_data="ui:newproject"),
+                ],
+                [
+                    InlineKeyboardButton("🧠 Модель", callback_data="ui:model"),
+                    InlineKeyboardButton("⚙️ Режим", callback_data="ui:mode"),
+                    InlineKeyboardButton("🎯 Глубина", callback_data="ui:effort"),
+                ],
+                [
+                    InlineKeyboardButton("📊 Статус", callback_data="ui:status"),
+                    InlineKeyboardButton("🆕 Начать заново", callback_data="ui:new"),
+                ],
+            ]
+        )
+
+    def _back_row(self) -> List[InlineKeyboardButton]:
+        return [InlineKeyboardButton("‹ Назад", callback_data="ui:home")]
+
+    def _model_keyboard(self, current: str) -> InlineKeyboardMarkup:
+        rows = []
+        for key, (value, desc) in self.MODEL_CHOICES.items():
+            mark = "✅ " if value == current else ""
+            short = desc.split("—", 1)[-1].strip()
+            rows.append(
+                [InlineKeyboardButton(f"{mark}{key} · {short}", callback_data=f"ui:setmodel:{key}")]
+            )
+        rows.append(self._back_row())
+        return InlineKeyboardMarkup(rows)
+
+    def _mode_keyboard(self, current: str) -> InlineKeyboardMarkup:
+        rows = []
+        for key in ("план", "правки", "обычный", "авто"):
+            value, desc = self.MODE_CHOICES[key]
+            mark = "✅ " if value == current else ""
+            rows.append(
+                [InlineKeyboardButton(f"{mark}{key} · {desc}", callback_data=f"ui:setmode:{key}")]
+            )
+        rows.append(self._back_row())
+        return InlineKeyboardMarkup(rows)
+
+    def _effort_keyboard(self, current: str) -> InlineKeyboardMarkup:
+        rows = []
+        for key, desc in self.EFFORT_CHOICES.items():
+            mark = "✅ " if key == current else ""
+            rows.append(
+                [InlineKeyboardButton(f"{mark}{key} · {desc}", callback_data=f"ui:seteffort:{key}")]
+            )
+        rows.append(self._back_row())
+        return InlineKeyboardMarkup(rows)
+
+    def _repos_keyboard(self) -> InlineKeyboardMarkup:
+        """Список проектов кнопками, по два в ряд."""
+        base = self.settings.approved_directory
+        try:
+            names = sorted(
+                d.name for d in base.iterdir()
+                if d.is_dir() and not d.name.startswith(".")
+            )
+        except Exception:
+            names = []
+
+        rows, row = [], []
+        for name in names[:20]:
+            mark = "📦 " if (base / name / ".git").is_dir() else "📁 "
+            row.append(InlineKeyboardButton(f"{mark}{name}", callback_data=f"cd:{name}"))
+            if len(row) == 2:
+                rows.append(row); row = []
+        if row:
+            rows.append(row)
+        rows.append([InlineKeyboardButton("✨ Новый проект", callback_data="ui:newproject")])
+        rows.append(self._back_row())
+        return InlineKeyboardMarkup(rows)
+
+    async def _handle_ui_callback(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Нажатия на кнопки интерфейса."""
+        query = update.callback_query
+        parts = query.data.split(":")
+        action = parts[1] if len(parts) > 1 else ""
+        value = parts[2] if len(parts) > 2 else ""
+
+        model = context.user_data.get("claude_model") or self.settings.claude_model or "opus"
+        mode = context.user_data.get("permission_mode") or "bypassPermissions"
+        effort = context.user_data.get("claude_effort") or "xhigh"
+        mode_ru = {
+            "plan": "план", "acceptEdits": "правки",
+            "default": "обычный", "bypassPermissions": "авто",
+        }
+
+        async def show(text: str, markup: InlineKeyboardMarkup) -> None:
+            try:
+                await query.edit_message_text(text, reply_markup=markup, parse_mode="HTML")
+            except Exception:
+                pass
+
+        if action == "home":
+            await query.answer()
+            current_dir = context.user_data.get("current_directory", self.settings.approved_directory)
+            project = current_dir.name if current_dir != self.settings.approved_directory else "не выбран"
+            await show(
+                f"📁 Проект: <b>{escape_html(project)}</b>\n"
+                f"🧠 Модель: <b>{escape_html(model)}</b> · "
+                f"Режим: <b>{mode_ru.get(mode, mode)}</b> · "
+                f"Глубина: <b>{escape_html(effort)}</b>\n\n"
+                f"Напишите задачу словами или выберите действие.",
+                self._main_keyboard(),
+            )
+
+        elif action == "repos":
+            await query.answer()
+            await show("📁 <b>Проекты</b>\n\nВыберите, с чем работаем:", self._repos_keyboard())
+
+        elif action == "model":
+            await query.answer()
+            await show(
+                "🧠 <b>Модель</b>\n\n"
+                "Opus входит в подписку. Fable сильнее, но тратит деньги сверх неё.",
+                self._model_keyboard(model),
+            )
+
+        elif action == "mode":
+            await query.answer()
+            await show(
+                "⚙️ <b>Режим работы</b>\n\n"
+                "«План» покажет замысел, ничего не меняя — удобно перед крупной задачей.",
+                self._mode_keyboard(mode),
+            )
+
+        elif action == "effort":
+            await query.answer()
+            await show(
+                "🎯 <b>Глубина проработки</b>\n\n"
+                "Чем выше, тем дольше думает и тем лучше результат.",
+                self._effort_keyboard(effort),
+            )
+
+        elif action == "setmodel" and value in self.MODEL_CHOICES:
+            new_value, desc = self.MODEL_CHOICES[value]
+            context.user_data["claude_model"] = new_value
+            await query.answer(f"Модель: {value}")
+            note = "\n\n⚠️ Fable тратит средства сверх подписки." if value == "fable" else ""
+            await show(
+                f"🧠 <b>Модель</b>\n\nВыбрано: <b>{value}</b> — {escape_html(desc)}{note}",
+                self._model_keyboard(new_value),
+            )
+
+        elif action == "setmode" and value in self.MODE_CHOICES:
+            new_value, desc = self.MODE_CHOICES[value]
+            context.user_data["permission_mode"] = new_value
+            await query.answer(f"Режим: {value}")
+            await show(
+                f"⚙️ <b>Режим работы</b>\n\nВыбрано: <b>{value}</b> — {escape_html(desc)}",
+                self._mode_keyboard(new_value),
+            )
+
+        elif action == "seteffort" and value in self.EFFORT_CHOICES:
+            context.user_data["claude_effort"] = value
+            await query.answer(f"Глубина: {value}")
+            await show(
+                f"🎯 <b>Глубина проработки</b>\n\n"
+                f"Выбрано: <b>{value}</b> — {escape_html(self.EFFORT_CHOICES[value])}",
+                self._effort_keyboard(value),
+            )
+
+        elif action == "status":
+            await query.answer()
+            current_dir = context.user_data.get("current_directory", self.settings.approved_directory)
+            project = current_dir.name if current_dir != self.settings.approved_directory else "не выбран"
+            session = "продолжается" if context.user_data.get("claude_session_id") else "новая"
+            await show(
+                f"📊 <b>Сейчас</b>\n\n"
+                f"📁 Проект: <b>{escape_html(project)}</b>\n"
+                f"💬 Разговор: <b>{session}</b>\n"
+                f"🧠 Модель: <b>{escape_html(model)}</b>\n"
+                f"⚙️ Режим: <b>{mode_ru.get(mode, mode)}</b>\n"
+                f"🎯 Глубина: <b>{escape_html(effort)}</b>",
+                self._main_keyboard(),
+            )
+
+        elif action == "new":
+            context.user_data["claude_session_id"] = None
+            context.user_data["session_started"] = True
+            context.user_data["force_new_session"] = True
+            await query.answer("Начинаем заново")
+            await show("🆕 <b>Начинаем заново</b>\n\nЧто делаем?", self._main_keyboard())
+
+        elif action == "newproject":
+            await query.answer()
+            await show(
+                "✨ <b>Новый проект</b>\n\n"
+                "Отправьте команду с именем проекта:\n"
+                "<code>/newproject имя-проекта</code>\n\n"
+                "Имя латиницей без пробелов, например <code>my-landing</code>.\n"
+                "Проект появится и на сервере, и на GitHub.",
+                InlineKeyboardMarkup([self._back_row()]),
+            )
+
+        else:
+            await query.answer()
+
     async def agentic_start(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
@@ -541,13 +803,25 @@ class MessageOrchestrator:
         dir_display = f"<code>{current_dir}/</code>"
 
         safe_name = escape_html(user.first_name)
+        model = context.user_data.get("claude_model") or self.settings.claude_model or "opus"
+        mode = context.user_data.get("permission_mode") or "bypassPermissions"
+        mode_ru = {
+            "plan": "план",
+            "acceptEdits": "правки",
+            "default": "обычный",
+            "bypassPermissions": "авто",
+        }.get(mode, mode)
+        project = current_dir.name if current_dir != self.settings.approved_directory else "не выбран"
+
         await update.message.reply_text(
-            f"Hi {safe_name}! I'm your AI coding assistant.\n"
-            f"Just tell me what you need — I can read, write, and run code.\n\n"
-            f"Working in: {dir_display}\n"
-            f"Commands: /new (reset) · /status"
+            f"👋 Привет, {safe_name}!\n\n"
+            f"Напишите задачу обычными словами — я прочитаю код, внесу правки, "
+            f"выполню команды и сохраню изменения.\n\n"
+            f"📁 Проект: <b>{escape_html(project)}</b>\n"
+            f"🧠 Модель: <b>{escape_html(model)}</b> · Режим: <b>{mode_ru}</b>"
             f"{sync_line}",
             parse_mode="HTML",
+            reply_markup=self._main_keyboard(),
         )
 
     async def agentic_new(
@@ -558,7 +832,10 @@ class MessageOrchestrator:
         context.user_data["session_started"] = True
         context.user_data["force_new_session"] = True
 
-        await update.message.reply_text("Session reset. What's next?")
+        await update.message.reply_text(
+            "🆕 Начинаем заново. Что делаем?",
+            reply_markup=self._main_keyboard(),
+        )
 
     async def agentic_status(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -567,25 +844,31 @@ class MessageOrchestrator:
         current_dir = context.user_data.get(
             "current_directory", self.settings.approved_directory
         )
-        dir_display = str(current_dir)
-
+        project = (
+            current_dir.name
+            if current_dir != self.settings.approved_directory
+            else "не выбран"
+        )
         session_id = context.user_data.get("claude_session_id")
-        session_status = "active" if session_id else "none"
+        session_status = "продолжается" if session_id else "новая"
 
-        # Cost info
-        cost_str = ""
-        rate_limiter = context.bot_data.get("rate_limiter")
-        if rate_limiter:
-            try:
-                user_status = rate_limiter.get_user_status(update.effective_user.id)
-                cost_usage = user_status.get("cost_usage", {})
-                current_cost = cost_usage.get("current", 0.0)
-                cost_str = f" · Cost: ${current_cost:.2f}"
-            except Exception:
-                pass
+        model = context.user_data.get("claude_model") or self.settings.claude_model or "opus"
+        mode = context.user_data.get("permission_mode") or "bypassPermissions"
+        mode_ru = {
+            "plan": "план", "acceptEdits": "правки",
+            "default": "обычный", "bypassPermissions": "авто",
+        }.get(mode, mode)
+        effort = context.user_data.get("claude_effort") or "xhigh"
 
         await update.message.reply_text(
-            f"📂 {dir_display} · Session: {session_status}{cost_str}"
+            f"📊 <b>Сейчас</b>\n\n"
+            f"📁 Проект: <b>{escape_html(project)}</b>\n"
+            f"💬 Разговор: <b>{session_status}</b>\n"
+            f"🧠 Модель: <b>{escape_html(model)}</b>\n"
+            f"⚙️ Режим: <b>{mode_ru}</b>\n"
+            f"🎯 Глубина: <b>{escape_html(effort)}</b>",
+            parse_mode="HTML",
+            reply_markup=self._main_keyboard(),
         )
 
     def _user_overrides(self, context: ContextTypes.DEFAULT_TYPE) -> dict:
@@ -647,11 +930,12 @@ class MessageOrchestrator:
         current = context.user_data.get("claude_model") or self.settings.claude_model or "opus"
 
         if not args:
-            lines = [f"Сейчас: <b>{current}</b>", "", "Доступно:"]
-            for key, (_value, desc) in self.MODEL_CHOICES.items():
-                lines.append(f"  <code>/model {key}</code> — {desc}")
-            lines += ["", "Действует со следующего сообщения."]
-            await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+            await update.message.reply_text(
+                "🧠 <b>Модель</b>\n\n"
+                "Opus входит в подписку. Fable сильнее, но тратит деньги сверх неё.",
+                parse_mode="HTML",
+                reply_markup=self._model_keyboard(current),
+            )
             return
 
         choice = args[0].lower()
@@ -685,17 +969,12 @@ class MessageOrchestrator:
         }
 
         if not args:
-            lines = [f"Сейчас: <b>{human.get(current, current)}</b>", "", "Доступно:"]
-            # В списке показываем только русские варианты; английские синонимы
-            # (plan/edits/default/auto) тоже принимаются, но не засоряют вывод.
-            for key in ("план", "правки", "обычный", "авто"):
-                lines.append(f"  <code>/mode {key}</code> — {self.MODE_CHOICES[key][1]}")
-            lines += [
-                "",
-                "Режим «план» удобен, когда хочется сначала посмотреть,",
-                "что Claude собирается сделать.",
-            ]
-            await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+            await update.message.reply_text(
+                "⚙️ <b>Режим работы</b>\n\n"
+                "«План» покажет замысел, ничего не меняя — удобно перед крупной задачей.",
+                parse_mode="HTML",
+                reply_markup=self._mode_keyboard(current),
+            )
             return
 
         choice = args[0].lower()
@@ -719,11 +998,12 @@ class MessageOrchestrator:
         current = context.user_data.get("claude_effort") or "xhigh"
 
         if not args:
-            lines = [f"Сейчас: <b>{current}</b>", "", "Доступно:"]
-            for key, desc in self.EFFORT_CHOICES.items():
-                lines.append(f"  <code>/effort {key}</code> — {desc}")
-            lines += ["", "Чем выше, тем дольше думает и тем лучше результат."]
-            await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+            await update.message.reply_text(
+                "🎯 <b>Глубина проработки</b>\n\n"
+                "Чем выше, тем дольше думает и тем лучше результат.",
+                parse_mode="HTML",
+                reply_markup=self._effort_keyboard(current),
+            )
             return
 
         choice = args[0].lower()
@@ -779,34 +1059,45 @@ class MessageOrchestrator:
         activity_log: List[Dict[str, Any]],
         verbose_level: int,
         start_time: float,
+        tick: int = 0,
     ) -> str:
-        """Build the progress message text based on activity so far."""
-        if not activity_log:
-            return "Working..."
+        """Сообщение о ходе работы.
 
+        Задача бота здесь — показать человеку, что он не завис: кадр индикатора
+        меняется на каждом обновлении, время идёт, а последние действия названы
+        по-человечески («читает config.py», а не «Read»).
+        """
         elapsed = time.time() - start_time
-        lines: List[str] = [f"Working... ({elapsed:.0f}s)\n"]
+        spin = _SPINNER[tick % len(_SPINNER)]
+        head = f"{spin} <b>Работаю</b> · {_human_elapsed(elapsed)}"
 
-        for entry in activity_log[-15:]:  # Show last 15 entries max
+        if not activity_log:
+            return head + "\n\n<i>обдумываю задачу…</i>"
+
+        lines: List[str] = [head, ""]
+
+        shown = activity_log[-12:]
+        if len(activity_log) > len(shown):
+            lines.append(f"<i>…ранее ещё {len(activity_log) - len(shown)} шагов</i>")
+
+        for entry in shown:
             kind = entry.get("kind", "tool")
             if kind == "text":
-                # Claude's intermediate reasoning/commentary
-                snippet = entry.get("detail", "")
-                if verbose_level >= 2:
-                    lines.append(f"\U0001f4ac {snippet}")
-                else:
-                    # Level 1: one short line
-                    lines.append(f"\U0001f4ac {snippet[:80]}")
+                snippet = entry.get("detail", "") or ""
+                limit = 300 if verbose_level >= 2 else 90
+                if snippet:
+                    lines.append(f"💭 <i>{escape_html(snippet[:limit])}</i>")
             else:
-                # Tool call
-                icon = _tool_icon(entry["name"])
-                if verbose_level >= 2 and entry.get("detail"):
-                    lines.append(f"{icon} {entry['name']}: {entry['detail']}")
+                name = entry.get("name", "")
+                icon = _tool_icon(name)
+                label = _tool_label(name)
+                detail = entry.get("detail") or ""
+                if detail and verbose_level >= 1:
+                    lines.append(
+                        f"{icon} {escape_html(label)} <code>{escape_html(detail[:70])}</code>"
+                    )
                 else:
-                    lines.append(f"{icon} {entry['name']}")
-
-        if len(activity_log) > 15:
-            lines.insert(1, f"... ({len(activity_log) - 15} earlier entries)\n")
+                    lines.append(f"{icon} {escape_html(label)}")
 
         return "\n".join(lines)
 
@@ -865,6 +1156,47 @@ class MessageOrchestrator:
 
         return asyncio.create_task(_heartbeat())
 
+    def _start_progress_ticker(
+        self,
+        progress_msg: Any,
+        tool_log: List[Dict[str, Any]],
+        verbose_level: int,
+        start_time: float,
+        reply_markup: Optional[InlineKeyboardMarkup],
+        interval: float = 4.0,
+    ) -> "asyncio.Task[None]":
+        """Двигать индикатор, даже когда от Claude ничего не приходит.
+
+        Claude может несколько минут обдумывать задачу, не вызывая инструментов.
+        Без этого сообщение замирало бы, и казалось бы, что бот завис.
+        Здесь же меняется кадр и растёт время работы.
+        """
+
+        async def _ticker() -> None:
+            frame = 0
+            last_text = ""
+            try:
+                while True:
+                    await asyncio.sleep(interval)
+                    frame += 1
+                    text = self._format_verbose_progress(
+                        tool_log, verbose_level, start_time, frame
+                    )
+                    if text == last_text:
+                        continue
+                    last_text = text
+                    try:
+                        await progress_msg.edit_text(
+                            text, reply_markup=reply_markup, parse_mode="HTML"
+                        )
+                    except Exception:
+                        # «сообщение не изменилось» и лимиты Telegram — не беда
+                        pass
+            except asyncio.CancelledError:
+                pass
+
+        return asyncio.create_task(_ticker())
+
     def _make_stream_callback(
         self,
         verbose_level: int,
@@ -897,6 +1229,7 @@ class MessageOrchestrator:
             return None
 
         last_edit_time = [0.0]  # mutable container for closure
+        tick = [0]  # кадр индикатора: меняется при каждом обновлении
 
         async def _on_stream(update_obj: StreamUpdate) -> None:
             # Stop all streaming activity after interrupt
@@ -961,14 +1294,15 @@ class MessageOrchestrator:
             # Throttle progress message edits to avoid Telegram rate limits
             if not draft_streamer and verbose_level >= 1:
                 now = time.time()
-                if (now - last_edit_time[0]) >= 2.0 and tool_log:
+                if (now - last_edit_time[0]) >= 2.0:
                     last_edit_time[0] = now
+                    tick[0] += 1
                     new_text = self._format_verbose_progress(
-                        tool_log, verbose_level, start_time
+                        tool_log, verbose_level, start_time, tick[0]
                     )
                     try:
                         await progress_msg.edit_text(
-                            new_text, reply_markup=reply_markup
+                            new_text, reply_markup=reply_markup, parse_mode="HTML"
                         )
                     except Exception:
                         pass
@@ -1101,10 +1435,12 @@ class MessageOrchestrator:
         # Create Stop button and interrupt event
         interrupt_event = asyncio.Event()
         stop_kb = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("Stop", callback_data=f"stop:{user_id}")]]
+            [[InlineKeyboardButton("⏹ Остановить", callback_data=f"stop:{user_id}")]]
         )
         progress_msg = await update.message.reply_text(
-            "Working...", reply_markup=stop_kb
+            f"{_SPINNER[0]} <b>Работаю</b> · 0 сек\n\n<i>обдумываю задачу…</i>",
+            reply_markup=stop_kb,
+            parse_mode="HTML",
         )
 
         # Register active request for stop callback
@@ -1119,7 +1455,7 @@ class MessageOrchestrator:
         if not claude_integration:
             self._active_requests.pop(user_id, None)
             await progress_msg.edit_text(
-                "Claude integration not available. Check configuration.",
+                "⚠️ Claude недоступен — проверьте настройки бота.",
                 reply_markup=None,
             )
             return
@@ -1163,6 +1499,15 @@ class MessageOrchestrator:
 
         # Independent typing heartbeat — stays alive even with no stream events
         heartbeat = self._start_typing_heartbeat(chat)
+        # Живой индикатор: двигается даже когда Claude долго думает молча,
+        # иначе сообщение замирает и кажется, что бот завис.
+        ticker = (
+            self._start_progress_ticker(
+                progress_msg, tool_log, verbose_level, start_time, stop_kb
+            )
+            if verbose_level >= 1 and draft_streamer is None
+            else None
+        )
 
         success = True
         try:
@@ -1211,7 +1556,7 @@ class MessageOrchestrator:
             if claude_response.interrupted:
                 response_content = (
                     response_content or ""
-                ) + "\n\n_(Interrupted by user)_"
+                ) + "\n\n_(остановлено вами)_"
 
             formatted_messages = formatter.format_claude_response(response_content)
 
@@ -1226,6 +1571,8 @@ class MessageOrchestrator:
             ]
         finally:
             heartbeat.cancel()
+            if ticker is not None:
+                ticker.cancel()
             self._active_requests.pop(user_id, None)
             if draft_streamer:
                 try:
@@ -1349,7 +1696,7 @@ class MessageOrchestrator:
 
         chat = update.message.chat
         await chat.send_action("typing")
-        progress_msg = await update.message.reply_text("Working...")
+        progress_msg = await update.message.reply_text(f"{_SPINNER[0]} Работаю…")
 
         # Try enhanced file handler, fall back to basic
         features = context.bot_data.get("features")
@@ -1507,12 +1854,12 @@ class MessageOrchestrator:
         image_handler = features.get_image_handler() if features else None
 
         if not image_handler:
-            await update.message.reply_text("Photo processing is not available.")
+            await update.message.reply_text("⚠️ Обработка фото недоступна.")
             return
 
         chat = update.message.chat
         await chat.send_action("typing")
-        progress_msg = await update.message.reply_text("Working...")
+        progress_msg = await update.message.reply_text(f"{_SPINNER[0]} Работаю…")
 
         try:
             photo = update.message.photo[-1]
@@ -1560,7 +1907,7 @@ class MessageOrchestrator:
 
         chat = update.message.chat
         await chat.send_action("typing")
-        progress_msg = await update.message.reply_text("Transcribing...")
+        progress_msg = await update.message.reply_text("🎧 Распознаю голосовое…")
 
         try:
             voice = update.message.voice
@@ -1904,24 +2251,24 @@ class MessageOrchestrator:
         # Only the requesting user can stop their own request
         if query.from_user.id != target_user_id:
             await query.answer(
-                "Only the requesting user can stop this.", show_alert=True
+                "Остановить может только тот, кто дал задачу.", show_alert=True
             )
             return
 
         active = self._active_requests.get(target_user_id)
         if not active:
-            await query.answer("Already completed.", show_alert=False)
+            await query.answer("Уже готово.", show_alert=False)
             return
         if active.interrupted:
-            await query.answer("Already stopping...", show_alert=False)
+            await query.answer("Уже останавливаю…", show_alert=False)
             return
 
         active.interrupt_event.set()
         active.interrupted = True
-        await query.answer("Stopping...", show_alert=False)
+        await query.answer("Останавливаю…", show_alert=False)
 
         try:
-            await active.progress_msg.edit_text("Stopping...", reply_markup=None)
+            await active.progress_msg.edit_text("⏹ Останавливаю…", reply_markup=None)
         except Exception:
             pass
 

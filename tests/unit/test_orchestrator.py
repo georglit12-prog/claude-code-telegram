@@ -4,7 +4,7 @@ import asyncio
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import ANY, AsyncMock, MagicMock
 
 import pytest
 
@@ -153,8 +153,8 @@ def test_agentic_registers_text_document_photo_handlers(agentic_settings, deps):
 
     # 5 message handlers (text, document, photo, voice, unknown commands passthrough)
     assert len(msg_handlers) == 5
-    # 2 callback handlers (stop: + cd:)
-    assert len(cb_handlers) == 2
+    # 3 callback handlers (stop: + ui: + cd:)
+    assert len(cb_handlers) == 3
 
 
 async def test_agentic_bot_commands(agentic_settings, deps):
@@ -208,7 +208,7 @@ async def test_restart_command_sends_sigterm(deps):
     assert "Restarting" in msg
 
 
-async def test_agentic_start_no_keyboard(agentic_settings, deps):
+async def test_agentic_start_has_keyboard(agentic_settings, deps):
     """Agentic /start sends brief message without inline keyboard."""
     orchestrator = MessageOrchestrator(agentic_settings, deps)
 
@@ -226,11 +226,12 @@ async def test_agentic_start_no_keyboard(agentic_settings, deps):
 
     update.message.reply_text.assert_called_once()
     call_kwargs = update.message.reply_text.call_args
-    # No reply_markup argument (no keyboard)
-    assert (
-        "reply_markup" not in call_kwargs.kwargs
-        or call_kwargs.kwargs.get("reply_markup") is None
-    )
+    # Приветствие теперь с кнопками быстрого доступа
+    markup = call_kwargs.kwargs.get("reply_markup")
+    assert markup is not None
+    labels = [b.text for row in markup.inline_keyboard for b in row]
+    assert any("Проекты" in t for t in labels)
+    assert any("Модель" in t for t in labels)
     # Contains user name
     assert "Alice" in call_kwargs.args[0]
 
@@ -248,10 +249,12 @@ async def test_agentic_new_resets_session(agentic_settings, deps):
     await orchestrator.agentic_new(update, context)
 
     assert context.user_data["claude_session_id"] is None
-    update.message.reply_text.assert_called_once_with("Session reset. What's next?")
+    call = update.message.reply_text.call_args
+    assert "заново" in call.args[0]
+    assert call.kwargs.get("reply_markup") is not None
 
 
-async def test_agentic_status_compact(agentic_settings, deps):
+async def test_agentic_status_shows_settings(agentic_settings, deps):
     """Agentic /status returns compact one-line status."""
     orchestrator = MessageOrchestrator(agentic_settings, deps)
 
@@ -267,7 +270,10 @@ async def test_agentic_status_compact(agentic_settings, deps):
 
     call_args = update.message.reply_text.call_args
     text = call_args.args[0]
-    assert "Session: none" in text
+    # Статус показывает проект, разговор и текущие настройки
+    assert "Разговор" in text and "новая" in text
+    assert "Модель" in text
+    assert "Режим" in text
 
 
 async def test_agentic_text_calls_claude(agentic_settings, deps):
@@ -342,7 +348,10 @@ async def test_agentic_callback_scoped_to_cd_pattern(agentic_settings, deps):
         if isinstance(call[0][0], CallbackQueryHandler)
     ]
 
-    assert len(cb_handlers) == 2
+    # Три обработчика: выбор проекта (cd:), остановка (stop:) и кнопки (ui:)
+    assert len(cb_handlers) == 3
+    ui_handler = [h for h in cb_handlers if h.pattern and h.pattern.match("ui:model")]
+    assert len(ui_handler) == 1
     # Find the cd: handler by pattern
     cd_handler = [h for h in cb_handlers if h.pattern and h.pattern.match("cd:x")]
     assert len(cd_handler) == 1

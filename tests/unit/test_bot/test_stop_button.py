@@ -97,9 +97,9 @@ class TestStopCallback:
 
         assert event.is_set()
         assert active.interrupted is True
-        query.answer.assert_awaited_once_with("Stopping...", show_alert=False)
+        query.answer.assert_awaited_once_with("Останавливаю…", show_alert=False)
         progress_msg.edit_text.assert_awaited_once_with(
-            "Stopping...", reply_markup=None
+            "⏹ Останавливаю…", reply_markup=None
         )
 
     async def test_non_owner_blocked(self, orchestrator):
@@ -125,7 +125,7 @@ class TestStopCallback:
         assert not event.is_set()
         assert not active.interrupted
         query.answer.assert_awaited_once_with(
-            "Only the requesting user can stop this.", show_alert=True
+            "Остановить может только тот, кто дал задачу.", show_alert=True
         )
 
     async def test_stop_after_completion(self, orchestrator):
@@ -143,10 +143,10 @@ class TestStopCallback:
         # No active request registered
         await orchestrator._handle_stop_callback(update, context)
 
-        query.answer.assert_awaited_once_with("Already completed.", show_alert=False)
+        query.answer.assert_awaited_once_with("Уже готово.", show_alert=False)
 
     async def test_double_stop_prevention(self, orchestrator):
-        """Second click shows 'Already stopping...' instead of re-firing."""
+        """Second click shows 'Уже останавливаю…' instead of re-firing."""
         event = asyncio.Event()
         active = ActiveRequest(
             user_id=100, interrupt_event=event, progress_msg=AsyncMock()
@@ -166,7 +166,7 @@ class TestStopCallback:
 
         await orchestrator._handle_stop_callback(update, context)
 
-        query.answer.assert_awaited_once_with("Already stopping...", show_alert=False)
+        query.answer.assert_awaited_once_with("Уже останавливаю…", show_alert=False)
 
 
 class TestStopButtonOnProgress:
@@ -225,12 +225,13 @@ class TestStopButtonOnProgress:
 
         # First reply_text call should be the progress message with Stop button
         first_call = update.message.reply_text.call_args_list[0]
-        assert first_call.args[0] == "Working..."
+        # Первое сообщение — живой индикатор работы
+        assert "Работаю" in first_call.args[0]
         reply_markup = first_call.kwargs.get("reply_markup")
         assert reply_markup is not None
         assert isinstance(reply_markup, InlineKeyboardMarkup)
         button = reply_markup.inline_keyboard[0][0]
-        assert button.text == "Stop"
+        assert button.text == "⏹ Остановить"
         assert button.callback_data == f"stop:{user_id}"
 
     async def test_active_request_cleaned_up_after_success(
