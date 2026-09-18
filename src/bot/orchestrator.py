@@ -1022,12 +1022,10 @@ class MessageOrchestrator:
 
             context.user_data["claude_session_id"] = claude_response.session_id
 
-            # Track directory changes
-            from .handlers.message import _update_working_directory_from_claude_response
-
-            _update_working_directory_from_claude_response(
-                claude_response, context, self.settings, user_id
-            )
+            # NOTE: upstream re-parsed Claude's reply for `cd ...` here and
+            # switched the active project on any match — even a `cd` inside an
+            # explanation or a code sample. The project is switched only by the
+            # explicit /repo command now.
 
             # Store interaction
             storage = context.bot_data.get("storage")
@@ -1271,11 +1269,10 @@ class MessageOrchestrator:
 
             context.user_data["claude_session_id"] = claude_response.session_id
 
-            from .handlers.message import _update_working_directory_from_claude_response
-
-            _update_working_directory_from_claude_response(
-                claude_response, context, self.settings, user_id
-            )
+            # NOTE: upstream re-parsed Claude's reply for `cd ...` here and
+            # switched the active project on any match — even a `cd` inside an
+            # explanation or a code sample. The project is switched only by the
+            # explicit /repo command now.
 
             from .utils.formatting import ResponseFormatter
 
@@ -1483,11 +1480,7 @@ class MessageOrchestrator:
 
         context.user_data["claude_session_id"] = claude_response.session_id
 
-        from .handlers.message import _update_working_directory_from_claude_response
-
-        _update_working_directory_from_claude_response(
-            claude_response, context, self.settings, user_id
-        )
+        # NOTE: see the note above — no directory switching from reply text.
 
         from .utils.formatting import ResponseFormatter
 

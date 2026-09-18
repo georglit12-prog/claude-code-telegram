@@ -20,6 +20,8 @@ from telegram.ext import (
     ContextTypes,
     Defaults,
     MessageHandler,
+    PersistenceInput,
+    PicklePersistence,
     filters,
 )
 
@@ -106,6 +108,26 @@ class ClaudeCodeBot:
         if proxy_url:
             builder.proxy(proxy_url)
             logger.info("Proxy configured", proxy=_redact_proxy_url(proxy_url))
+
+        # Remember the selected project across restarts. Without persistence the
+        # current directory lives only in user_data, so every `systemctl restart`
+        # silently drops the user back to no project at all.
+        # Only user_data is persisted: bot_data holds live database connections,
+        # which cannot be pickled.
+        persistence_path = os.environ.get("PTB_PERSISTENCE_PATH")
+        if persistence_path:
+            builder.persistence(
+                PicklePersistence(
+                    filepath=persistence_path,
+                    store_data=PersistenceInput(
+                        user_data=True,
+                        chat_data=False,
+                        bot_data=False,
+                        callback_data=False,
+                    ),
+                )
+            )
+            logger.info("Persistence enabled", path=persistence_path)
 
         self.app = builder.build()
 

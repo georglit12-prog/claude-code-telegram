@@ -541,8 +541,11 @@ class TestClaudeSandboxSettings:
 
         assert len(captured_options) == 1
         opts = captured_options[0]
-        assert str(tmp_path) in opts.system_prompt
-        assert "relative paths" in opts.system_prompt.lower()
+        # Claude Code's own preset is kept; the boundary is only appended to it.
+        assert opts.system_prompt["type"] == "preset"
+        assert opts.system_prompt["preset"] == "claude_code"
+        assert str(tmp_path) in opts.system_prompt["append"]
+        assert "relative paths" in opts.system_prompt["append"].lower()
 
     async def test_disallowed_tools_passed_to_options(self, tmp_path):
         """Test that disallowed_tools from config are passed to ClaudeAgentOptions."""
@@ -1282,8 +1285,15 @@ class TestClaudeMdLoading:
     def sdk_manager(self, config):
         return ClaudeSDKManager(config)
 
-    async def test_claude_md_appended_to_system_prompt(self, sdk_manager, tmp_path):
-        """CLAUDE.md content is appended to system prompt when present."""
+    async def test_claude_md_not_inlined_into_system_prompt(
+        self, sdk_manager, tmp_path
+    ):
+        """CLAUDE.md is left to the CLI, not inlined into the system prompt.
+
+        With setting_sources=["project"] the CLI loads CLAUDE.md itself.
+        Inlining it here would duplicate it in context and, for a large file,
+        exceed the argv size limit and fail the whole run.
+        """
         claude_md = tmp_path / "CLAUDE.md"
         claude_md.write_text("# Project Rules\nAlways use type hints.")
 
@@ -1300,13 +1310,13 @@ class TestClaudeMdLoading:
             await sdk_manager.execute_command(prompt="test", working_directory=tmp_path)
 
         opts = captured[0]
-        assert "# Project Rules" in opts.system_prompt
-        assert "Always use type hints." in opts.system_prompt
+        assert "# Project Rules" not in opts.system_prompt["append"]
+        assert "Always use type hints." not in opts.system_prompt["append"]
 
-    async def test_system_prompt_unchanged_without_claude_md(
+    async def test_system_prompt_keeps_claude_code_preset(
         self, sdk_manager, tmp_path
     ):
-        """System prompt is just the base when no CLAUDE.md exists."""
+        """The preset is kept and only the sandbox boundary is appended."""
         captured: list = []
         mock_factory = _mock_client_factory(
             _make_assistant_message("ok"),
@@ -1320,8 +1330,9 @@ class TestClaudeMdLoading:
             await sdk_manager.execute_command(prompt="test", working_directory=tmp_path)
 
         opts = captured[0]
-        assert "Use relative paths." in opts.system_prompt
-        assert "# Project Rules" not in opts.system_prompt
+        assert opts.system_prompt["type"] == "preset"
+        assert opts.system_prompt["preset"] == "claude_code"
+        assert "Use relative paths." in opts.system_prompt["append"]
 
     async def test_setting_sources_includes_project(self, sdk_manager, tmp_path):
         """setting_sources=['project'] is passed to ClaudeAgentOptions."""

@@ -28,7 +28,7 @@ from claude_agent_sdk import (
 )
 from claude_agent_sdk._errors import MessageParseError
 from claude_agent_sdk._internal.message_parser import parse_message
-from claude_agent_sdk.types import StreamEvent
+from claude_agent_sdk.types import StreamEvent, SystemPromptPreset
 
 from ..config.settings import Settings
 from ..security.validators import SecurityValidator
@@ -329,18 +329,21 @@ class ClaudeSDKManager:
                 stderr_lines.append(line)
                 logger.debug("Claude CLI stderr", line=line)
 
-            # Build system prompt, loading CLAUDE.md from working directory if present
-            base_prompt = (
-                f"All file operations must stay within {working_directory}. "
-                "Use relative paths."
-            )
-            claude_md_path = Path(working_directory) / "CLAUDE.md"
-            if claude_md_path.exists():
-                base_prompt += "\n\n" + claude_md_path.read_text(encoding="utf-8")
-                logger.info(
-                    "Loaded CLAUDE.md into system prompt",
-                    path=str(claude_md_path),
-                )
+            # Keep Claude Code's own system prompt and only append the sandbox
+            # boundary. Passing a plain string would REPLACE the preset, which
+            # drops tool guidance, safety rules and environment context — the
+            # bot then behaves noticeably worse than the CLI (upstream #101).
+            # CLAUDE.md is not read here: with setting_sources=["project"] the
+            # CLI loads it itself, so inlining it would duplicate it in context
+            # and, for a large CLAUDE.md, blow the argv size limit.
+            base_prompt: SystemPromptPreset = {
+                "type": "preset",
+                "preset": "claude_code",
+                "append": (
+                    f"All file operations must stay within {working_directory}. "
+                    "Use relative paths."
+                ),
+            }
 
             # When DISABLE_TOOL_VALIDATION=true, pass [] (not None) for
             # allowed/disallowed tools. ClaudeAgentOptions declares these

@@ -50,6 +50,13 @@ def setup_logging(debug: bool = False) -> None:
         stream=sys.stdout,
     )
 
+    # httpx logs every request URL at INFO, and every Telegram Bot API URL
+    # embeds the bot token: "https://api.telegram.org/bot<TOKEN>/getUpdates".
+    # At the default level that writes the token to the log on every poll,
+    # several times a minute, forever. Keep these libraries at WARNING.
+    for noisy in ("httpx", "httpcore"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
     # Configure structlog
     structlog.configure(
         processors=[
