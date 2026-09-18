@@ -310,8 +310,13 @@ class ClaudeSDKManager:
         stream_callback: Optional[Callable[[StreamUpdate], None]] = None,
         interrupt_event: Optional[asyncio.Event] = None,
         images: Optional[List[Dict[str, str]]] = None,
+        overrides: Optional[Dict[str, str]] = None,
     ) -> ClaudeResponse:
-        """Execute Claude Code command via SDK."""
+        """Execute Claude Code command via SDK.
+
+        overrides — выбор пользователя из команд /model, /mode, /effort.
+        Пусто = берём значения из настроек бота.
+        """
         start_time = asyncio.get_event_loop().time()
 
         logger.info(
@@ -384,9 +389,10 @@ class ClaudeSDKManager:
                     )
 
             # Build Claude Agent options
+            overrides = overrides or {}
             options = ClaudeAgentOptions(
                 max_turns=self.config.claude_max_turns,
-                model=self.config.claude_model or None,
+                model=overrides.get("model") or self.config.claude_model or None,
                 max_budget_usd=self.config.claude_max_cost_per_request,
                 cwd=str(working_directory),
                 allowed_tools=sdk_allowed_tools,
@@ -405,6 +411,12 @@ class ClaudeSDKManager:
                 setting_sources=["project"],
                 stderr=_stderr_callback,
             )
+
+            # Режим работы и глубина проработки — из команд /mode и /effort.
+            if overrides.get("permission_mode"):
+                options.permission_mode = overrides["permission_mode"]
+            if overrides.get("effort"):
+                options.effort = overrides["effort"]
 
             # Pass MCP server configuration if enabled
             if self.config.enable_mcp and self.config.mcp_config_path:

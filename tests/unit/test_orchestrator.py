@@ -82,8 +82,11 @@ def deps():
     }
 
 
-def test_agentic_registers_6_commands(agentic_settings, deps):
-    """Agentic mode registers start, new, status, verbose, repo, restart commands."""
+def test_agentic_registers_commands(agentic_settings, deps):
+    """Agentic mode registers the base commands plus our own.
+
+    Наши: /newproject, /model, /mode, /effort.
+    """
     orchestrator = MessageOrchestrator(agentic_settings, deps)
     app = MagicMock()
     app.add_handler = MagicMock()
@@ -100,13 +103,12 @@ def test_agentic_registers_6_commands(agentic_settings, deps):
     ]
     commands = [h[0][0].commands for h in cmd_handlers]
 
-    assert len(cmd_handlers) == 6
-    assert frozenset({"start"}) in commands
-    assert frozenset({"new"}) in commands
-    assert frozenset({"status"}) in commands
-    assert frozenset({"verbose"}) in commands
-    assert frozenset({"repo"}) in commands
-    assert frozenset({"restart"}) in commands
+    assert len(cmd_handlers) == 10
+    for name in (
+        "start", "new", "status", "verbose", "repo", "restart",
+        "newproject", "model", "mode", "effort",
+    ):
+        assert frozenset({name}) in commands, f"нет команды /{name}"
 
 
 def test_classic_registers_14_commands(classic_settings, deps):
@@ -156,13 +158,15 @@ def test_agentic_registers_text_document_photo_handlers(agentic_settings, deps):
 
 
 async def test_agentic_bot_commands(agentic_settings, deps):
-    """Agentic mode returns 6 bot commands."""
+    """Agentic mode exposes the base commands plus ours in the Telegram menu."""
     orchestrator = MessageOrchestrator(agentic_settings, deps)
     commands = await orchestrator.get_bot_commands()
 
-    assert len(commands) == 6
     cmd_names = [c.command for c in commands]
-    assert cmd_names == ["start", "new", "status", "verbose", "repo", "restart"]
+    assert cmd_names == [
+        "start", "new", "status", "verbose", "repo",
+        "newproject", "model", "mode", "effort", "restart",
+    ]
 
 
 async def test_classic_bot_commands(classic_settings, deps):

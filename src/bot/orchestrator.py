@@ -327,6 +327,10 @@ class MessageOrchestrator:
             ("status", self.agentic_status),
             ("verbose", self.agentic_verbose),
             ("repo", self.agentic_repo),
+            ("newproject", self.agentic_newproject),
+            ("model", self.agentic_model),
+            ("mode", self.agentic_mode),
+            ("effort", self.agentic_effort),
             ("restart", command.restart_command),
         ]
         if self.settings.enable_project_threads:
@@ -459,7 +463,11 @@ class MessageOrchestrator:
                 BotCommand("new", "Start a fresh session"),
                 BotCommand("status", "Show session status"),
                 BotCommand("verbose", "Set output verbosity (0/1/2)"),
-                BotCommand("repo", "List repos / switch workspace"),
+                BotCommand("repo", "Проекты: список и переключение"),
+                BotCommand("newproject", "Создать новый проект"),
+                BotCommand("model", "Модель: opus | sonnet | haiku | fable"),
+                BotCommand("mode", "Режим: план | правки | обычный | авто"),
+                BotCommand("effort", "Глубина: low | medium | high | xhigh | max"),
                 BotCommand("restart", "Restart the bot"),
             ]
             if self.settings.enable_project_threads:
@@ -580,12 +588,156 @@ class MessageOrchestrator:
             f"📂 {dir_display} · Session: {session_status}{cost_str}"
         )
 
+    def _user_overrides(self, context: ContextTypes.DEFAULT_TYPE) -> dict:
+        """Выбор пользователя из команд /model, /mode, /effort.
+
+        Пусто = работаем на значениях из настроек бота.
+        """
+        out: dict = {}
+        if context.user_data.get("claude_model"):
+            out["model"] = context.user_data["claude_model"]
+        if context.user_data.get("permission_mode"):
+            out["permission_mode"] = context.user_data["permission_mode"]
+        if context.user_data.get("claude_effort"):
+            out["effort"] = context.user_data["claude_effort"]
+        return out
+
     def _get_verbose_level(self, context: ContextTypes.DEFAULT_TYPE) -> int:
         """Return effective verbose level: per-user override or global default."""
         user_override = context.user_data.get("verbose_level")
         if user_override is not None:
             return int(user_override)
         return self.settings.verbose_level
+
+    # --- Выбор модели, режима работы и глубины (команды /model /mode /effort) ---
+    # Значения живут в user_data и переживают перезапуск (PicklePersistence).
+    # Читает их sdk_integration при сборке вызова Claude.
+
+    MODEL_CHOICES = {
+        "opus": ("opus", "Opus 5 — входит в подписку Max"),
+        "sonnet": ("sonnet", "Sonnet 5 — быстрее и дешевле"),
+        "haiku": ("haiku", "Haiku 4.5 — самый быстрый, для мелочей"),
+        "fable": ("claude-fable-5-1", "Fable 5.1 — сильнее всех, но тратит usage credits"),
+    }
+
+    MODE_CHOICES = {
+        "план": ("plan", "сначала показывает план, ничего не меняет"),
+        "plan": ("plan", "сначала показывает план, ничего не меняет"),
+        "правки": ("acceptEdits", "правит файлы сразу, команды спрашивает"),
+        "edits": ("acceptEdits", "правит файлы сразу, команды спрашивает"),
+        "обычный": ("default", "обычный режим Claude Code"),
+        "default": ("default", "обычный режим Claude Code"),
+        "авто": ("bypassPermissions", "делает всё сам, без вопросов"),
+        "auto": ("bypassPermissions", "делает всё сам, без вопросов"),
+    }
+
+    EFFORT_CHOICES = {
+        "low": "низкая — быстрые простые задачи",
+        "medium": "средняя",
+        "high": "высокая",
+        "xhigh": "очень высокая — сложный код",
+        "max": "максимальная — когда важна точность, а не скорость",
+    }
+
+    async def agentic_model(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Выбор модели: /model [opus|sonnet|haiku|fable]."""
+        args = update.message.text.split()[1:] if update.message.text else []
+        current = context.user_data.get("claude_model") or self.settings.claude_model or "opus"
+
+        if not args:
+            lines = [f"Сейчас: <b>{current}</b>", "", "Доступно:"]
+            for key, (_value, desc) in self.MODEL_CHOICES.items():
+                lines.append(f"  <code>/model {key}</code> — {desc}")
+            lines += ["", "Действует со следующего сообщения."]
+            await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+            return
+
+        choice = args[0].lower()
+        if choice not in self.MODEL_CHOICES:
+            await update.message.reply_text(
+                "Не знаю такую модель. Доступны: "
+                + ", ".join(self.MODEL_CHOICES) + "."
+            )
+            return
+
+        value, desc = self.MODEL_CHOICES[choice]
+        context.user_data["claude_model"] = value
+        note = ""
+        if choice == "fable":
+            note = "\n\n⚠️ Fable тратит usage credits сверх подписки."
+        await update.message.reply_text(
+            f"Модель: <b>{choice}</b> — {desc}{note}", parse_mode="HTML"
+        )
+
+    async def agentic_mode(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Режим работы: /mode [план|правки|обычный|авто]."""
+        args = update.message.text.split()[1:] if update.message.text else []
+        current = context.user_data.get("permission_mode") or "bypassPermissions"
+        human = {
+            "plan": "план",
+            "acceptEdits": "правки",
+            "default": "обычный",
+            "bypassPermissions": "авто",
+        }
+
+        if not args:
+            lines = [f"Сейчас: <b>{human.get(current, current)}</b>", "", "Доступно:"]
+            # В списке показываем только русские варианты; английские синонимы
+            # (plan/edits/default/auto) тоже принимаются, но не засоряют вывод.
+            for key in ("план", "правки", "обычный", "авто"):
+                lines.append(f"  <code>/mode {key}</code> — {self.MODE_CHOICES[key][1]}")
+            lines += [
+                "",
+                "Режим «план» удобен, когда хочется сначала посмотреть,",
+                "что Claude собирается сделать.",
+            ]
+            await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+            return
+
+        choice = args[0].lower()
+        if choice not in self.MODE_CHOICES:
+            await update.message.reply_text(
+                "Не знаю такой режим. Доступны: план, правки, обычный, авто."
+            )
+            return
+
+        value, desc = self.MODE_CHOICES[choice]
+        context.user_data["permission_mode"] = value
+        await update.message.reply_text(
+            f"Режим: <b>{human.get(value, value)}</b> — {desc}", parse_mode="HTML"
+        )
+
+    async def agentic_effort(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Глубина проработки: /effort [low|medium|high|xhigh|max]."""
+        args = update.message.text.split()[1:] if update.message.text else []
+        current = context.user_data.get("claude_effort") or "xhigh"
+
+        if not args:
+            lines = [f"Сейчас: <b>{current}</b>", "", "Доступно:"]
+            for key, desc in self.EFFORT_CHOICES.items():
+                lines.append(f"  <code>/effort {key}</code> — {desc}")
+            lines += ["", "Чем выше, тем дольше думает и тем лучше результат."]
+            await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+            return
+
+        choice = args[0].lower()
+        if choice not in self.EFFORT_CHOICES:
+            await update.message.reply_text(
+                "Доступны: " + ", ".join(self.EFFORT_CHOICES) + "."
+            )
+            return
+
+        context.user_data["claude_effort"] = choice
+        await update.message.reply_text(
+            f"Глубина: <b>{choice}</b> — {self.EFFORT_CHOICES[choice]}",
+            parse_mode="HTML",
+        )
 
     async def agentic_verbose(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -913,11 +1065,19 @@ class MessageOrchestrator:
         return caption_sent
 
     async def agentic_text(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        prompt_override: Optional[str] = None,
     ) -> None:
-        """Direct Claude passthrough. Simple progress. No suggestions."""
+        """Direct Claude passthrough. Simple progress. No suggestions.
+
+        prompt_override — текст задачи вместо текста сообщения. Нужен командам,
+        которые сами формулируют задачу (например /newproject): объекты
+        сообщений в python-telegram-bot неизменяемые, подменить текст нельзя.
+        """
         user_id = update.effective_user.id
-        message_text = update.message.text
+        message_text = prompt_override or update.message.text
 
         logger.info(
             "Agentic text message",
@@ -1014,6 +1174,7 @@ class MessageOrchestrator:
                 on_stream=on_stream,
                 force_new=force_new,
                 interrupt_event=interrupt_event,
+                overrides=self._user_overrides(context),
             )
 
             # New session created successfully — clear the one-shot flag
@@ -1262,6 +1423,7 @@ class MessageOrchestrator:
                 session_id=session_id,
                 on_stream=on_stream,
                 force_new=force_new,
+                overrides=self._user_overrides(context),
             )
 
             if force_new:
@@ -1471,6 +1633,7 @@ class MessageOrchestrator:
                 on_stream=on_stream,
                 force_new=force_new,
                 images=images,
+                overrides=self._user_overrides(context),
             )
         finally:
             heartbeat.cancel()
@@ -1566,6 +1729,74 @@ class MessageOrchestrator:
             f"for {self.settings.voice_provider_display_name} and install "
             'voice extras with: pip install "claude-code-telegram[voice]"'
         )
+
+    async def agentic_newproject(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Создать новый проект: /newproject имя-проекта [описание]."""
+        text = update.message.text or ""
+        args = text.split()[1:]
+        base = self.settings.approved_directory
+
+        if not args:
+            await update.message.reply_text(
+                "Создать новый проект:\n"
+                "<code>/newproject имя-проекта</code>\n"
+                "<code>/newproject имя-проекта Короткое описание</code>\n\n"
+                "Имя — латиницей, без пробелов, например <code>my-landing</code>.\n"
+                "Проект появится и на сервере, и на GitHub (приватным), "
+                "и его можно будет открыть на компьютере.",
+                parse_mode="HTML",
+            )
+            return
+
+        name = args[0].lower()
+        description = " ".join(args[1:]).strip()
+
+        # Имя станет и папкой, и репозиторием — пускаем только безопасные символы.
+        if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,60}", name):
+            await update.message.reply_text(
+                "Имя должно быть латиницей без пробелов: буквы, цифры, дефис.\n"
+                "Например: <code>my-landing</code>",
+                parse_mode="HTML",
+            )
+            return
+
+        target = base / name
+        if target.exists():
+            await update.message.reply_text(
+                f"Проект <code>{escape_html(name)}</code> уже есть. "
+                f"Открыть: <code>/repo {escape_html(name)}</code>",
+                parse_mode="HTML",
+            )
+            return
+
+        await update.message.reply_text(
+            f"Создаю проект <b>{escape_html(name)}</b>…", parse_mode="HTML"
+        )
+
+        # Дальше работает сам Claude: он умеет и git, и gh. Так создание проекта
+        # проходит тем же путём, что и любая другая задача, — с отчётом в чат.
+        desc_part = f' с описанием "{description}"' if description else ""
+        context.user_data["current_directory"] = base
+        prompt = (
+            f"Создай новый проект «{name}»{desc_part}. По шагам:\n"
+            f"1. Создай папку {target} и перейди в неё.\n"
+            f"2. Положи README.md с названием проекта и парой строк о нём.\n"
+            f"3. Положи .gitignore, закрывающий: .env, secrets/, *.key, "
+            f"node_modules/, __pycache__/, .venv/, *.db, .DS_Store\n"
+            f"4. Положи CLAUDE.md с краткой памяткой по проекту.\n"
+            f"5. Выполни: git init, git branch -M main, git add -A, "
+            f'git commit -m "Начало проекта"\n'
+            f"6. Выполни: gh repo create {name} --private --source=. "
+            f"--remote=origin --push\n"
+            f"7. Коротко отчитайся, что получилось, и напомни команду "
+            f"для открытия проекта на компьютере: "
+            f'gh repo clone {name} "Имя папки"'
+        )
+
+        # Отдаём Claude как обычную задачу — со стримингом и отчётом в чат.
+        await self.agentic_text(update, context, prompt_override=prompt)
 
     async def agentic_repo(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
