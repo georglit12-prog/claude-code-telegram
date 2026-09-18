@@ -408,7 +408,12 @@ class ClaudeSDKManager:
                     "excludedCommands": self.config.sandbox_excluded_commands or [],
                 },
                 system_prompt=base_prompt,
-                setting_sources=["project"],
+                # "user" — личные скилы бота из ~/.claude/skills,
+                # "project" — CLAUDE.md, скилы и настройки самого репозитория.
+                setting_sources=["user", "project"],
+                # Включает инструмент Skill и делает скилы видимыми для Claude.
+                # Без этого они лежат на диске, но модель о них не знает.
+                skills="all",
                 stderr=_stderr_callback,
             )
 

@@ -1335,7 +1335,7 @@ class TestClaudeMdLoading:
         assert "Use relative paths." in opts.system_prompt["append"]
 
     async def test_setting_sources_includes_project(self, sdk_manager, tmp_path):
-        """setting_sources=['project'] is passed to ClaudeAgentOptions."""
+        """Загружаются настройки пользователя и проекта, скилы включены."""
         captured: list = []
         mock_factory = _mock_client_factory(
             _make_assistant_message("ok"),
@@ -1349,4 +1349,6 @@ class TestClaudeMdLoading:
             await sdk_manager.execute_command(prompt="test", working_directory=tmp_path)
 
         opts = captured[0]
-        assert opts.setting_sources == ["project"]
+        # "user" — личные скилы бота, "project" — CLAUDE.md и скилы репозитория
+        assert opts.setting_sources == ["user", "project"]
+        assert opts.skills == "all"
