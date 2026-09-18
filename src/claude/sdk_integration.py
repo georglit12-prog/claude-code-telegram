@@ -207,6 +207,16 @@ GUARDED_TOOLS = FILE_TOOLS | BASH_TOOLS
 _FILE_PATH_KEYS = ("file_path", "path", "notebook_path")
 
 
+def _skills_dirs() -> List[Path]:
+    """Папки со скилами, которые нужно открыть Claude на чтение.
+
+    Только каталог скилов: остальное содержимое ~/.claude (сессии, настройки)
+    остаётся за границей рабочей папки.
+    """
+    skills = Path.home() / ".claude" / "skills"
+    return [skills] if skills.is_dir() else []
+
+
 def _make_can_use_tool_callback(
     security_validator: SecurityValidator,
     working_directory: Path,
@@ -414,6 +424,10 @@ class ClaudeSDKManager:
                 # Включает инструмент Skill и делает скилы видимыми для Claude.
                 # Без этого они лежат на диске, но модель о них не знает.
                 skills="all",
+                # Claude Code ограничивает чтение рабочей папкой, а скилы лежат
+                # в ~/.claude/skills. Без этой строки они перечисляются, но
+                # любой вызов падает с "Execute skill: <name>".
+                add_dirs=_skills_dirs(),
                 stderr=_stderr_callback,
             )
 
