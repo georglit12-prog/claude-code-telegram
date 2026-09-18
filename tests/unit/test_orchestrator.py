@@ -103,10 +103,10 @@ def test_agentic_registers_commands(agentic_settings, deps):
     ]
     commands = [h[0][0].commands for h in cmd_handlers]
 
-    assert len(cmd_handlers) == 11
+    assert len(cmd_handlers) == 12
     for name in (
         "start", "new", "status", "verbose", "repo", "restart",
-        "help", "newproject", "model", "mode", "effort",
+        "help", "usage", "newproject", "model", "mode", "effort",
     ):
         assert frozenset({name}) in commands, f"нет команды /{name}"
 
@@ -165,7 +165,7 @@ async def test_agentic_bot_commands(agentic_settings, deps):
     cmd_names = [c.command for c in commands]
     assert cmd_names == [
         "start", "new", "status", "verbose", "repo",
-        "help", "newproject", "model", "mode", "effort", "restart",
+        "usage", "help", "newproject", "model", "mode", "effort", "restart",
     ]
 
 

@@ -6,6 +6,7 @@ classic mode, delegates to existing full-featured handlers.
 """
 
 import asyncio
+import json
 import re
 import time
 from dataclasses import dataclass, field
@@ -372,6 +373,7 @@ class MessageOrchestrator:
             ("verbose", self.agentic_verbose),
             ("repo", self.agentic_repo),
             ("help", self.agentic_help),
+            ("usage", self.agentic_usage),
             ("newproject", self.agentic_newproject),
             ("model", self.agentic_model),
             ("mode", self.agentic_mode),
@@ -517,6 +519,7 @@ class MessageOrchestrator:
                 BotCommand("status", "Что сейчас: проект и настройки"),
                 BotCommand("verbose", "Подробность отчёта: 0, 1 или 2"),
                 BotCommand("repo", "Сменить проект"),
+                BotCommand("usage", "Лимиты и расход"),
                 BotCommand("help", "Как пользоваться ботом"),
                 BotCommand("newproject", "Создать новый проект"),
                 BotCommand("model", "Какая модель: умнее или быстрее"),
@@ -579,6 +582,7 @@ class MessageOrchestrator:
         "⚙️ <b>Как работать</b> — сразу делать или сначала показать план\n"
         "🎯 <b>Как глубоко</b> — тщательность против скорости\n"
         "📊 <b>Что сейчас</b> — текущие настройки\n"
+        "📈 <b>Лимиты и расход</b> — сколько задач и токенов потрачено\n"
         "🔄 <b>Забыть разговор</b> — начать с чистого листа\n"
         "\n"
         "<b>Когда что выбирать</b>\n"
@@ -597,6 +601,125 @@ class MessageOrchestrator:
         "Долго молчу или завис — команда <code>/restart</code>.\n"
         "Сделал не то — «Забыть разговор» и объясните заново."
     )
+
+    @staticmethod
+    def _collect_usage() -> Dict[str, Any]:
+        """Считает расход по записям сессий Claude Code.
+
+        Остаток лимита подписки узнать нельзя: токен бота выдан только для
+        запросов к модели и не имеет доступа к профилю. Поэтому показываем
+        то, что действительно известно — сколько потрачено и когда.
+        """
+        import glob
+        from datetime import datetime, timedelta, timezone
+
+        now = datetime.now(timezone.utc)
+        day_ago = now - timedelta(days=1)
+        week_ago = now - timedelta(days=7)
+        five_hours_ago = now - timedelta(hours=5)
+
+        stats = {
+            "day_tokens": 0, "week_tokens": 0, "all_tokens": 0,
+            "day_requests": 0, "week_requests": 0, "all_requests": 0,
+            "window_requests": 0, "last_seen": None, "by_model": {},
+        }
+
+        pattern = str(Path.home() / ".claude" / "projects" / "**" / "*.jsonl")
+        for path in glob.glob(pattern, recursive=True):
+            try:
+                with open(path, encoding="utf-8", errors="ignore") as fh:
+                    for line in fh:
+                        try:
+                            rec = json.loads(line)
+                        except Exception:
+                            continue
+                        msg = rec.get("message")
+                        if not isinstance(msg, dict):
+                            continue
+                        usage = msg.get("usage")
+                        if not isinstance(usage, dict):
+                            continue
+
+                        tokens = int(usage.get("input_tokens", 0) or 0) + int(
+                            usage.get("output_tokens", 0) or 0
+                        )
+                        model = msg.get("model") or "?"
+                        stats["all_tokens"] += tokens
+                        stats["all_requests"] += 1
+                        stats["by_model"][model] = stats["by_model"].get(model, 0) + tokens
+
+                        raw_ts = rec.get("timestamp")
+                        if not raw_ts:
+                            continue
+                        try:
+                            ts = datetime.fromisoformat(str(raw_ts).replace("Z", "+00:00"))
+                        except Exception:
+                            continue
+
+                        if stats["last_seen"] is None or ts > stats["last_seen"]:
+                            stats["last_seen"] = ts
+                        if ts >= week_ago:
+                            stats["week_tokens"] += tokens
+                            stats["week_requests"] += 1
+                        if ts >= day_ago:
+                            stats["day_tokens"] += tokens
+                            stats["day_requests"] += 1
+                        if ts >= five_hours_ago:
+                            stats["window_requests"] += 1
+            except Exception:
+                continue
+
+        return stats
+
+    @staticmethod
+    def _fmt_tokens(n: int) -> str:
+        """Крупные числа словами: 1.2 млн, 340 тыс."""
+        if n >= 1_000_000:
+            return f"{n / 1_000_000:.1f} млн".replace(".", ",")
+        if n >= 1_000:
+            return f"{n / 1_000:.0f} тыс."
+        return str(n)
+
+    def _usage_text(self, context: ContextTypes.DEFAULT_TYPE) -> str:
+        """Сообщение про лимиты и расход."""
+        st = self._collect_usage()
+        model = (
+            context.user_data.get("claude_model")
+            or self.settings.claude_model
+            or "opus"
+        )
+
+        lines = [
+            "📈 <b>Лимиты и расход</b>",
+            "",
+            "<b>За сегодня</b>",
+            f"  задач: {st['day_requests']} · токенов: {self._fmt_tokens(st['day_tokens'])}",
+            "<b>За неделю</b>",
+            f"  задач: {st['week_requests']} · токенов: {self._fmt_tokens(st['week_tokens'])}",
+            "<b>За всё время</b>",
+            f"  задач: {st['all_requests']} · токенов: {self._fmt_tokens(st['all_tokens'])}",
+        ]
+
+        if st["by_model"]:
+            lines += ["", "<b>По моделям</b>"]
+            for name, tok in sorted(st["by_model"].items(), key=lambda x: -x[1])[:4]:
+                short = name.replace("claude-", "").replace("-5", " 5").replace("-4-5", " 4.5")
+                lines.append(f"  {escape_html(short)}: {self._fmt_tokens(tok)}")
+
+        lines += [
+            "",
+            f"Сейчас работаем на модели <b>{escape_html(model)}</b>.",
+            "",
+            "<i>Точный остаток лимита подписки виден только в приложении "
+            "Claude и на claude.ai — у бота нет к нему доступа. Если лимит "
+            "закончится, я отвечу ошибкой и скажу, когда он обновится.</i>",
+        ]
+        if st["window_requests"] >= 1:
+            lines.append(
+                f"\n<i>Лимиты подписки обновляются раз в 5 часов. "
+                f"За последние 5 часов: {st['window_requests']} задач.</i>"
+            )
+        return "\n".join(lines)
 
     def _main_keyboard(self) -> InlineKeyboardMarkup:
         """Главные кнопки.
@@ -620,6 +743,7 @@ class MessageOrchestrator:
                     InlineKeyboardButton("🔄 Забыть разговор", callback_data="ui:new"),
                 ],
                 [
+                    InlineKeyboardButton("📈 Лимиты и расход", callback_data="ui:usage"),
                     InlineKeyboardButton("❓ Как пользоваться", callback_data="ui:help"),
                 ],
             ]
@@ -796,6 +920,10 @@ class MessageOrchestrator:
             context.user_data["force_new_session"] = True
             await query.answer("Начинаем заново")
             await show("🆕 <b>Начинаем заново</b>\n\nЧто делаем?", self._main_keyboard())
+
+        elif action == "usage":
+            await query.answer()
+            await show(self._usage_text(context), self._main_keyboard())
 
         elif action == "help":
             await query.answer()
@@ -985,6 +1113,16 @@ class MessageOrchestrator:
         """Инструкция: /help."""
         await update.message.reply_text(
             self.HELP_TEXT,
+            parse_mode="HTML",
+            reply_markup=self._main_keyboard(),
+        )
+
+    async def agentic_usage(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Лимиты и расход: /usage."""
+        await update.message.reply_text(
+            self._usage_text(context),
             parse_mode="HTML",
             reply_markup=self._main_keyboard(),
         )
