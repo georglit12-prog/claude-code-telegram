@@ -371,6 +371,7 @@ class MessageOrchestrator:
             ("status", self.agentic_status),
             ("verbose", self.agentic_verbose),
             ("repo", self.agentic_repo),
+            ("help", self.agentic_help),
             ("newproject", self.agentic_newproject),
             ("model", self.agentic_model),
             ("mode", self.agentic_mode),
@@ -511,16 +512,17 @@ class MessageOrchestrator:
         """Return bot commands appropriate for current mode."""
         if self.settings.agentic_mode:
             commands = [
-                BotCommand("start", "Start the bot"),
-                BotCommand("new", "Start a fresh session"),
-                BotCommand("status", "Show session status"),
-                BotCommand("verbose", "Set output verbosity (0/1/2)"),
-                BotCommand("repo", "Проекты: список и переключение"),
+                BotCommand("start", "Начать работу"),
+                BotCommand("new", "Забыть разговор и начать заново"),
+                BotCommand("status", "Что сейчас: проект и настройки"),
+                BotCommand("verbose", "Подробность отчёта: 0, 1 или 2"),
+                BotCommand("repo", "Сменить проект"),
+                BotCommand("help", "Как пользоваться ботом"),
                 BotCommand("newproject", "Создать новый проект"),
-                BotCommand("model", "Модель: opus | sonnet | haiku | fable"),
-                BotCommand("mode", "Режим: план | правки | обычный | авто"),
-                BotCommand("effort", "Глубина: low | medium | high | xhigh | max"),
-                BotCommand("restart", "Restart the bot"),
+                BotCommand("model", "Какая модель: умнее или быстрее"),
+                BotCommand("mode", "Как работать: сразу или сначала план"),
+                BotCommand("effort", "Как глубоко думать"),
+                BotCommand("restart", "Перезапустить бота, если завис"),
             ]
             if self.settings.enable_project_threads:
                 commands.append(BotCommand("sync_threads", "Sync project topics"))
@@ -552,22 +554,73 @@ class MessageOrchestrator:
     # Кнопки под сообщениями
     # ------------------------------------------------------------------
 
+    # Инструкция прямо в боте: короткая, по делу, без технических терминов.
+    HELP_TEXT = (
+        "❓ <b>Как пользоваться</b>\n"
+        "\n"
+        "<b>Главное</b>\n"
+        "Просто напишите, что нужно сделать, обычными словами:\n"
+        "<i>«добавь кнопку заказа на главную»</i>\n"
+        "<i>«почему форма не отправляется?»</i>\n"
+        "<i>«исправь опечатку в заголовке»</i>\n"
+        "\n"
+        "Я прочитаю код, внесу правки, проверю и сохраню их в GitHub. "
+        "На компьютере они появятся после <code>git pull</code>.\n"
+        "\n"
+        "<b>Пока я работаю</b>\n"
+        "Крутится индикатор и растёт время — значит всё идёт. "
+        "Ниже видно, что именно я делаю. Если передумали — кнопка "
+        "«Остановить».\n"
+        "\n"
+        "<b>Кнопки</b>\n"
+        "📂 <b>Сменить проект</b> — выбрать, с чем работаем\n"
+        "✨ <b>Создать проект</b> — новый проект с нуля\n"
+        "🧠 <b>Какая модель</b> — умнее или быстрее\n"
+        "⚙️ <b>Как работать</b> — сразу делать или сначала показать план\n"
+        "🎯 <b>Как глубоко</b> — тщательность против скорости\n"
+        "📊 <b>Что сейчас</b> — текущие настройки\n"
+        "🔄 <b>Забыть разговор</b> — начать с чистого листа\n"
+        "\n"
+        "<b>Когда что выбирать</b>\n"
+        "• Крупная переделка — сначала «Как работать → план», посмотрите "
+        "замысел, потом верните «авто».\n"
+        "• Мелочь вроде опечатки — «Какая модель → sonnet», будет быстрее.\n"
+        "• Запутанная ошибка — «Как глубоко → max».\n"
+        "• Новая тема — «Забыть разговор», чтобы я не тянул старый контекст.\n"
+        "\n"
+        "<b>Что ещё умею</b>\n"
+        "• Понимаю скриншоты — просто пришлите картинку\n"
+        "• Читаю файлы — пришлите документом\n"
+        "• Знаю ваши скилы: «разбери статью», «расшевели задачу»\n"
+        "\n"
+        "<b>Если что-то не так</b>\n"
+        "Долго молчу или завис — команда <code>/restart</code>.\n"
+        "Сделал не то — «Забыть разговор» и объясните заново."
+    )
+
     def _main_keyboard(self) -> InlineKeyboardMarkup:
-        """Главные кнопки: то, что нужно чаще всего."""
+        """Главные кнопки.
+
+        Подписи — по делу, а не по названию настройки: человек читает
+        «Сменить проект», а не «Проекты», и сразу понимает, что произойдёт.
+        """
         return InlineKeyboardMarkup(
             [
                 [
-                    InlineKeyboardButton("📁 Проекты", callback_data="ui:repos"),
-                    InlineKeyboardButton("✨ Новый проект", callback_data="ui:newproject"),
+                    InlineKeyboardButton("📂 Сменить проект", callback_data="ui:repos"),
+                    InlineKeyboardButton("✨ Создать проект", callback_data="ui:newproject"),
                 ],
                 [
-                    InlineKeyboardButton("🧠 Модель", callback_data="ui:model"),
-                    InlineKeyboardButton("⚙️ Режим", callback_data="ui:mode"),
-                    InlineKeyboardButton("🎯 Глубина", callback_data="ui:effort"),
+                    InlineKeyboardButton("🧠 Какая модель", callback_data="ui:model"),
+                    InlineKeyboardButton("⚙️ Как работать", callback_data="ui:mode"),
+                    InlineKeyboardButton("🎯 Как глубоко", callback_data="ui:effort"),
                 ],
                 [
-                    InlineKeyboardButton("📊 Статус", callback_data="ui:status"),
-                    InlineKeyboardButton("🆕 Начать заново", callback_data="ui:new"),
+                    InlineKeyboardButton("📊 Что сейчас", callback_data="ui:status"),
+                    InlineKeyboardButton("🔄 Забыть разговор", callback_data="ui:new"),
+                ],
+                [
+                    InlineKeyboardButton("❓ Как пользоваться", callback_data="ui:help"),
                 ],
             ]
         )
@@ -744,6 +797,10 @@ class MessageOrchestrator:
             await query.answer("Начинаем заново")
             await show("🆕 <b>Начинаем заново</b>\n\nЧто делаем?", self._main_keyboard())
 
+        elif action == "help":
+            await query.answer()
+            await show(self.HELP_TEXT, InlineKeyboardMarkup([self._back_row()]))
+
         elif action == "newproject":
             await query.answer()
             await show(
@@ -897,30 +954,40 @@ class MessageOrchestrator:
     # Читает их sdk_integration при сборке вызова Claude.
 
     MODEL_CHOICES = {
-        "opus": ("opus", "Opus 5 — входит в подписку Max"),
-        "sonnet": ("sonnet", "Sonnet 5 — быстрее и дешевле"),
-        "haiku": ("haiku", "Haiku 4.5 — самый быстрый, для мелочей"),
-        "fable": ("claude-fable-5-1", "Fable 5.1 — сильнее всех, но тратит usage credits"),
+        "opus": ("opus", "умная, входит в подписку"),
+        "sonnet": ("sonnet", "быстрее, для простых задач"),
+        "haiku": ("haiku", "самая быстрая, для мелочей"),
+        "fable": ("claude-fable-5-1", "сильнее всех, но платно"),
     }
 
     MODE_CHOICES = {
-        "план": ("plan", "сначала показывает план, ничего не меняет"),
-        "plan": ("plan", "сначала показывает план, ничего не меняет"),
-        "правки": ("acceptEdits", "правит файлы сразу, команды спрашивает"),
-        "edits": ("acceptEdits", "правит файлы сразу, команды спрашивает"),
-        "обычный": ("default", "обычный режим Claude Code"),
-        "default": ("default", "обычный режим Claude Code"),
-        "авто": ("bypassPermissions", "делает всё сам, без вопросов"),
-        "auto": ("bypassPermissions", "делает всё сам, без вопросов"),
+        "план": ("plan", "сначала покажет замысел, ничего не тронет"),
+        "plan": ("plan", "сначала покажет замысел, ничего не тронет"),
+        "правки": ("acceptEdits", "правит файлы, команды спрашивает"),
+        "edits": ("acceptEdits", "правит файлы, команды спрашивает"),
+        "обычный": ("default", "спрашивает перед важными действиями"),
+        "default": ("default", "спрашивает перед важными действиями"),
+        "авто": ("bypassPermissions", "делает всё сам, ничего не спрашивает"),
+        "auto": ("bypassPermissions", "делает всё сам, ничего не спрашивает"),
     }
 
     EFFORT_CHOICES = {
-        "low": "низкая — быстрые простые задачи",
-        "medium": "средняя",
-        "high": "высокая",
-        "xhigh": "очень высокая — сложный код",
-        "max": "максимальная — когда важна точность, а не скорость",
+        "low": "быстро и поверхностно",
+        "medium": "средне",
+        "high": "тщательно",
+        "xhigh": "очень тщательно",
+        "max": "максимально, но дольше",
     }
+
+    async def agentic_help(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Инструкция: /help."""
+        await update.message.reply_text(
+            self.HELP_TEXT,
+            parse_mode="HTML",
+            reply_markup=self._main_keyboard(),
+        )
 
     async def agentic_model(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE

@@ -103,10 +103,10 @@ def test_agentic_registers_commands(agentic_settings, deps):
     ]
     commands = [h[0][0].commands for h in cmd_handlers]
 
-    assert len(cmd_handlers) == 10
+    assert len(cmd_handlers) == 11
     for name in (
         "start", "new", "status", "verbose", "repo", "restart",
-        "newproject", "model", "mode", "effort",
+        "help", "newproject", "model", "mode", "effort",
     ):
         assert frozenset({name}) in commands, f"нет команды /{name}"
 
@@ -165,7 +165,7 @@ async def test_agentic_bot_commands(agentic_settings, deps):
     cmd_names = [c.command for c in commands]
     assert cmd_names == [
         "start", "new", "status", "verbose", "repo",
-        "newproject", "model", "mode", "effort", "restart",
+        "help", "newproject", "model", "mode", "effort", "restart",
     ]
 
 
@@ -230,8 +230,9 @@ async def test_agentic_start_has_keyboard(agentic_settings, deps):
     markup = call_kwargs.kwargs.get("reply_markup")
     assert markup is not None
     labels = [b.text for row in markup.inline_keyboard for b in row]
-    assert any("Проекты" in t for t in labels)
-    assert any("Модель" in t for t in labels)
+    assert any("проект" in t.lower() for t in labels)
+    assert any("модель" in t.lower() for t in labels)
+    assert any("пользоваться" in t.lower() for t in labels)
     # Contains user name
     assert "Alice" in call_kwargs.args[0]
 
