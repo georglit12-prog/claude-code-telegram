@@ -36,6 +36,12 @@ from telegram.ext import (
 from ..claude.sdk_integration import StreamUpdate
 from ..config.settings import Settings
 from ..projects import PrivateTopicsUnavailableError
+from .features.ask_user import (
+    SYSTEM_HINT as ASK_SYSTEM_HINT,
+    TOOL_NAME as ASK_TOOL_NAME,
+    AskUserChannel,
+    build_ask_server,
+)
 from .features.project_sync import ProjectSync
 from .utils.draft_streamer import DraftStreamer, generate_draft_id
 from .utils.html_format import escape_html
@@ -209,6 +215,8 @@ class ActiveRequest:
     interrupt_event: asyncio.Event = field(default_factory=asyncio.Event)
     interrupted: bool = False
     progress_msg: Any = None  # telegram Message object
+    # Канал «спросить и дождаться»: через него Claude задаёт вопрос кнопками.
+    ask_channel: Any = None
 
 
 class MessageOrchestrator:
@@ -488,6 +496,14 @@ class MessageOrchestrator:
             CallbackQueryHandler(
                 self._inject_deps(self._handle_ui_callback),
                 pattern=r"^ui:",
+            )
+        )
+
+        # Варианты ответа на вопрос, заданный Claude
+        app.add_handler(
+            CallbackQueryHandler(
+                self._inject_deps(self._handle_ask_callback),
+                pattern=r"^ask:",
             )
         )
 
@@ -934,6 +950,37 @@ class MessageOrchestrator:
         except Exception:
             logger.debug("Failed to update card on interrupt")
         return "Останавливаю…"
+
+    async def _handle_ask_callback(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Нажат вариант ответа на вопрос Claude."""
+        query = update.callback_query
+        parts = query.data.split(":")
+        key = parts[1] if len(parts) > 1 else ""
+        choice = parts[2] if len(parts) > 2 else ""
+
+        active = self._active_requests.get(query.from_user.id)
+        channel = getattr(active, "ask_channel", None) if active else None
+        if channel is None:
+            await query.answer("Этот вопрос уже неактуален.", show_alert=False)
+            return
+
+        answer = await channel.answer_button(key, choice)
+        if answer is None:
+            await query.answer("Этот вопрос уже неактуален.", show_alert=False)
+            return
+        await query.answer(answer[:200])
+
+    async def _answer_pending_question(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> bool:
+        """Текст в ответ на вопрос Claude — это ответ, а не новая задача."""
+        active = self._active_requests.get(update.effective_user.id)
+        channel = getattr(active, "ask_channel", None) if active else None
+        if channel is None or not channel.waiting:
+            return False
+        return await channel.answer_text(update.message.text or "")
 
     async def _handle_keyboard_button(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -1405,10 +1452,15 @@ class MessageOrchestrator:
             reply_markup=self._main_keyboard(),
         )
 
-    def _user_overrides(self, context: ContextTypes.DEFAULT_TYPE) -> dict:
-        """Выбор пользователя из команд /model, /mode, /effort.
+    def _user_overrides(
+        self, context: ContextTypes.DEFAULT_TYPE, ask_server: Any = None
+    ) -> dict:
+        """Выбор пользователя из команд /model, /mode, /effort, /web.
 
-        Пусто = работаем на значениях из настроек бота.
+        Пусто = работаем на значениях из настроек бота. ask_server — набор
+        инструментов этой задачи (вопрос кнопками); он живёт только на время
+        запроса и в user_data не кладётся: там persistence, а сервер не
+        сериализуется.
         """
         out: dict = {}
         if context.user_data.get("claude_model"):
@@ -1417,6 +1469,10 @@ class MessageOrchestrator:
             out["permission_mode"] = context.user_data["permission_mode"]
         if context.user_data.get("claude_effort"):
             out["effort"] = context.user_data["claude_effort"]
+        if ask_server is not None:
+            out["mcp_servers"] = {"telegram": ask_server}
+            out["extra_tools"] = [ASK_TOOL_NAME]
+            out["system_hint"] = ASK_SYSTEM_HINT
         if self._web_enabled(context):
             # Снимаем запрет только с веб-инструментов, остальные запреты
             # из настроек бота остаются в силе.
@@ -1995,6 +2051,13 @@ class MessageOrchestrator:
         ):
             return
 
+        # Если Claude ждёт ответа на свой вопрос, текст — это ответ ему,
+        # а не новая задача.
+        if prompt_override is None and await self._answer_pending_question(
+            update, context
+        ):
+            return
+
         message_text = prompt_override or update.message.text
 
         logger.info(
@@ -2029,11 +2092,20 @@ class MessageOrchestrator:
             parse_mode="HTML",
         )
 
+        # Канал вопросов: Claude спрашивает кнопками, ответ возвращается ему
+        # как результат инструмента, и задача продолжается.
+        ask_channel = AskUserChannel(
+            bot=context.bot,
+            chat_id=chat.id,
+            message_thread_id=update.message.message_thread_id,
+        )
+
         # Register active request for stop callback
         active_request = ActiveRequest(
             user_id=user_id,
             interrupt_event=interrupt_event,
             progress_msg=progress_msg,
+            ask_channel=ask_channel,
         )
         self._active_requests[user_id] = active_request
 
@@ -2118,7 +2190,9 @@ class MessageOrchestrator:
                 on_stream=on_stream,
                 force_new=force_new,
                 interrupt_event=interrupt_event,
-                overrides=self._user_overrides(context),
+                overrides=self._user_overrides(
+                    context, ask_server=build_ask_server(ask_channel)
+                ),
             )
 
             # New session created successfully — clear the one-shot flag
@@ -2171,6 +2245,11 @@ class MessageOrchestrator:
             heartbeat.cancel()
             if ticker is not None:
                 ticker.cancel()
+            # Незакрытые вопросы теряют смысл вместе с задачей.
+            try:
+                await ask_channel.cancel()
+            except Exception:
+                logger.debug("Failed to cancel pending questions")
             self._active_requests.pop(user_id, None)
             if draft_streamer:
                 try:

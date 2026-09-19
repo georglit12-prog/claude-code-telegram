@@ -353,13 +353,20 @@ class ClaudeSDKManager:
             # CLAUDE.md is not read here: with setting_sources=["project"] the
             # CLI loads it itself, so inlining it would duplicate it in context
             # and, for a large CLAUDE.md, blow the argv size limit.
+            append_prompt = (
+                f"All file operations must stay within {working_directory}. "
+                "Use relative paths."
+            )
+            # Подсказка про вопрос с кнопками добавляется только когда
+            # инструмент действительно подан (см. mcp_servers ниже).
+            extra_hint = (overrides or {}).get("system_hint")
+            if extra_hint:
+                append_prompt = f"{append_prompt}\n\n{extra_hint}"
+
             base_prompt: SystemPromptPreset = {
                 "type": "preset",
                 "preset": "claude_code",
-                "append": (
-                    f"All file operations must stay within {working_directory}. "
-                    "Use relative paths."
-                ),
+                "append": append_prompt,
             }
 
             # When DISABLE_TOOL_VALIDATION=true, pass [] (not None) for
@@ -443,6 +450,20 @@ class ClaudeSDKManager:
                 options.permission_mode = overrides["permission_mode"]
             if overrides.get("effort"):
                 options.effort = overrides["effort"]
+
+            # Инструменты, живущие внутри процесса бота (вопрос с кнопками).
+            # Приходят на задачу: у них внутри ссылка на конкретный чат.
+            inline_servers = (overrides or {}).get("mcp_servers")
+            if inline_servers:
+                options.mcp_servers = {
+                    **(options.mcp_servers or {}),
+                    **inline_servers,
+                }
+                extra_tools = (overrides or {}).get("extra_tools") or []
+                if extra_tools and options.allowed_tools:
+                    options.allowed_tools = list(options.allowed_tools) + [
+                        tool for tool in extra_tools if tool not in options.allowed_tools
+                    ]
 
             # Pass MCP server configuration if enabled
             if self.config.enable_mcp and self.config.mcp_config_path:

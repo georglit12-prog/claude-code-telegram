@@ -154,8 +154,8 @@ def test_agentic_registers_text_document_photo_handlers(agentic_settings, deps):
 
     # 5 message handlers (text, document, photo, voice, unknown commands passthrough)
     assert len(msg_handlers) == 5
-    # 3 callback handlers (stop: + ui: + cd:)
-    assert len(cb_handlers) == 3
+    # 4 callback handlers (stop: + ui: + ask: + cd:)
+    assert len(cb_handlers) == 4
 
 
 async def test_agentic_bot_commands(agentic_settings, deps):
@@ -360,10 +360,13 @@ async def test_agentic_callback_scoped_to_cd_pattern(agentic_settings, deps):
         if isinstance(call[0][0], CallbackQueryHandler)
     ]
 
-    # Три обработчика: выбор проекта (cd:), остановка (stop:) и кнопки (ui:)
-    assert len(cb_handlers) == 3
+    # Четыре обработчика: выбор проекта (cd:), остановка (stop:), кнопки (ui:)
+    # и варианты ответа на вопрос Claude (ask:)
+    assert len(cb_handlers) == 4
     ui_handler = [h for h in cb_handlers if h.pattern and h.pattern.match("ui:model")]
     assert len(ui_handler) == 1
+    ask_handler = [h for h in cb_handlers if h.pattern and h.pattern.match("ask:k:1")]
+    assert len(ask_handler) == 1
     # Find the cd: handler by pattern
     cd_handler = [h for h in cb_handlers if h.pattern and h.pattern.match("cd:x")]
     assert len(cd_handler) == 1
