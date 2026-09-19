@@ -1004,3 +1004,96 @@ async def test_bot_suffixed_command_not_forwarded(agentic_settings, deps):
     ) as mock_claude:
         await orchestrator._handle_unknown_command(update, context)
         mock_claude.assert_not_called()
+
+
+# --- Синхронизация проекта с GitHub вокруг задачи ---
+
+
+def _sync_update_and_context(agentic_settings, claude_integration):
+    update = MagicMock()
+    update.effective_user.id = 123
+    update.message.text = "Поправь README"
+    update.message.message_id = 1
+    update.message.chat.type = "private"
+    update.message.chat.send_action = AsyncMock()
+    update.message.reply_text = AsyncMock()
+    progress_msg = AsyncMock()
+    progress_msg.delete = AsyncMock()
+    update.message.reply_text.return_value = progress_msg
+
+    context = MagicMock()
+    context.user_data = {"current_directory": Path(agentic_settings.approved_directory) / "proj"}
+    context.bot_data = {
+        "settings": agentic_settings,
+        "claude_integration": claude_integration,
+        "storage": None,
+        "rate_limiter": None,
+        "audit_logger": None,
+    }
+    return update, context
+
+
+async def test_agentic_text_pulls_before_and_pushes_after(agentic_settings, deps):
+    """Перед задачей — pull, после ответа — push; их слова уходят в чат."""
+    orchestrator = MessageOrchestrator(agentic_settings, deps)
+    orchestrator.project_sync.pull = AsyncMock(return_value="⬇️ Подтянул 1 коммит")
+    orchestrator.project_sync.push = AsyncMock(return_value="☁️ Отправлено на GitHub: 1 файл")
+
+    mock_response = MagicMock()
+    mock_response.session_id = "s1"
+    mock_response.content = "Готово"
+    mock_response.tools_used = []
+    mock_response.interrupted = False
+    claude_integration = AsyncMock()
+    claude_integration.run_command = AsyncMock(return_value=mock_response)
+
+    update, context = _sync_update_and_context(agentic_settings, claude_integration)
+    project_dir = context.user_data["current_directory"]
+
+    await orchestrator.agentic_text(update, context)
+
+    orchestrator.project_sync.pull.assert_awaited_once_with(project_dir)
+    orchestrator.project_sync.push.assert_awaited_once_with(project_dir)
+    texts = [c.args[0] for c in update.message.reply_text.call_args_list]
+    assert "⬇️ Подтянул 1 коммит" in texts
+    assert "☁️ Отправлено на GitHub: 1 файл" in texts
+    # pull — до ответа Claude, push — после
+    assert texts.index("⬇️ Подтянул 1 коммит") < texts.index("Готово")
+    assert texts.index("☁️ Отправлено на GitHub: 1 файл") > texts.index("Готово")
+
+
+async def test_agentic_text_sync_silent_when_nothing_to_say(agentic_settings, deps):
+    """Пустой ответ скрипта — никаких лишних сообщений в чате."""
+    orchestrator = MessageOrchestrator(agentic_settings, deps)
+    orchestrator.project_sync.pull = AsyncMock(return_value="")
+    orchestrator.project_sync.push = AsyncMock(return_value="")
+
+    mock_response = MagicMock()
+    mock_response.session_id = "s1"
+    mock_response.content = "Готово"
+    mock_response.tools_used = []
+    mock_response.interrupted = False
+    claude_integration = AsyncMock()
+    claude_integration.run_command = AsyncMock(return_value=mock_response)
+
+    update, context = _sync_update_and_context(agentic_settings, claude_integration)
+    await orchestrator.agentic_text(update, context)
+
+    texts = [c.args[0] for c in update.message.reply_text.call_args_list]
+    assert texts.count("Готово") == 1
+    assert not any(t.startswith(("⬇️", "☁️", "⚠️")) for t in texts)
+
+
+async def test_agentic_text_no_push_when_claude_fails(agentic_settings, deps):
+    """Если Claude упал, ничего не отправляем: нечего сохранять."""
+    orchestrator = MessageOrchestrator(agentic_settings, deps)
+    orchestrator.project_sync.pull = AsyncMock(return_value="")
+    orchestrator.project_sync.push = AsyncMock(return_value="☁️ не должно быть")
+
+    claude_integration = AsyncMock()
+    claude_integration.run_command = AsyncMock(side_effect=RuntimeError("boom"))
+
+    update, context = _sync_update_and_context(agentic_settings, claude_integration)
+    await orchestrator.agentic_text(update, context)
+
+    orchestrator.project_sync.push.assert_not_awaited()

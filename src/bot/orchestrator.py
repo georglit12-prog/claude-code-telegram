@@ -34,6 +34,7 @@ from telegram.ext import (
 from ..claude.sdk_integration import StreamUpdate
 from ..config.settings import Settings
 from ..projects import PrivateTopicsUnavailableError
+from .features.project_sync import ProjectSync
 from .utils.draft_streamer import DraftStreamer, generate_draft_id
 from .utils.html_format import escape_html
 from .utils.image_extractor import (
@@ -178,6 +179,8 @@ class MessageOrchestrator:
 
     def __init__(self, settings: Settings, deps: Dict[str, Any]):
         self.settings = settings
+        # Синхронизация проекта с GitHub вокруг каждой задачи (см. project_sync).
+        self.project_sync = ProjectSync(settings)
         self.deps = deps
         self._active_requests: Dict[int, ActiveRequest] = {}
         self._known_commands: frozenset[str] = frozenset()
@@ -1703,6 +1706,8 @@ class MessageOrchestrator:
             interrupt_event=interrupt_event,
         )
 
+        await self._sync_before_task(update, current_dir)
+
         # Independent typing heartbeat — stays alive even with no stream events
         heartbeat = self._start_typing_heartbeat(chat)
         # Живой индикатор: двигается даже когда Claude долго думает молча,
@@ -1861,6 +1866,9 @@ class MessageOrchestrator:
                 except Exception as img_err:
                     logger.warning("Image send failed", error=str(img_err))
 
+        if success:
+            await self._sync_after_task(update, current_dir)
+
         # Audit log
         audit_logger = context.bot_data.get("audit_logger")
         if audit_logger:
@@ -1967,6 +1975,8 @@ class MessageOrchestrator:
             approved_directory=self.settings.approved_directory,
         )
 
+        await self._sync_before_task(update, current_dir)
+
         heartbeat = self._start_typing_heartbeat(chat)
         try:
             claude_response = await claude_integration.run_command(
@@ -2041,6 +2051,8 @@ class MessageOrchestrator:
                         )
                     except Exception as img_err:
                         logger.warning("Image send failed", error=str(img_err))
+
+            await self._sync_after_task(update, current_dir)
 
         except Exception as e:
             from .handlers.message import _format_error_message
@@ -2176,6 +2188,8 @@ class MessageOrchestrator:
             approved_directory=self.settings.approved_directory,
         )
 
+        await self._sync_before_task(update, current_dir)
+
         heartbeat = self._start_typing_heartbeat(chat)
         try:
             claude_response = await claude_integration.run_command(
@@ -2249,6 +2263,8 @@ class MessageOrchestrator:
                 except Exception as img_err:
                     logger.warning("Image send failed", error=str(img_err))
 
+        await self._sync_after_task(update, current_dir)
+
     async def _handle_unknown_command(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
@@ -2282,6 +2298,24 @@ class MessageOrchestrator:
             f"for {self.settings.voice_provider_display_name} and install "
             'voice extras with: pip install "claude-code-telegram[voice]"'
         )
+
+    async def _sync_before_task(self, update: Update, current_dir: Any) -> None:
+        """Забрать с GitHub то, что сделано на другом устройстве, и сказать об этом."""
+        note = await self.project_sync.pull(current_dir)
+        await self._send_sync_note(update, note)
+
+    async def _sync_after_task(self, update: Update, current_dir: Any) -> None:
+        """Сохранить и отправить правки на GitHub, отчитаться в чат."""
+        note = await self.project_sync.push(current_dir)
+        await self._send_sync_note(update, note)
+
+    async def _send_sync_note(self, update: Update, note: str) -> None:
+        if not note:
+            return
+        try:
+            await update.message.reply_text(note, reply_markup=None)
+        except Exception as e:
+            logger.warning("Failed to send sync note", error=str(e))
 
     async def agentic_newproject(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE

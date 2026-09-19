@@ -74,6 +74,11 @@ class Settings(BaseSettings):
     claude_cli_path: Optional[str] = Field(
         None, description="Path to Claude CLI executable"
     )
+    # Скрипт синхронизации проекта с GitHub (tools/sync-project.sh из проекта
+    # бота): перед задачей — pull, после — commit и push. Пусто — выключено.
+    project_sync_script: Optional[str] = Field(
+        None, description="Path to the project sync script (pull before, push after)"
+    )
     anthropic_api_key: Optional[SecretStr] = Field(
         None,
         description="Anthropic API key for SDK (optional if CLI logged in)",
