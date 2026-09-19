@@ -235,6 +235,106 @@ class TestCheckBashDirectoryBoundary:
         assert "/tmp" in error
 
 
+class TestMultilineAndRedirection:
+    """Regression tests: multi-line scripts, redirects and heredocs must not
+    be mis-tokenized into bogus filesystem-boundary violations (#issue
+    "cd targets '/dev/null'" and friends seen in production logs)."""
+
+    def setup_method(self) -> None:
+        self.approved = Path("/srv/claude-bot/workspace")
+        self.cwd = self.approved / "claude-tg-bot"
+
+    def test_newline_is_a_command_separator(self) -> None:
+        """A second line is a separate command, not more args to the first."""
+        cmd = "cd subdir\ntouch file.txt"
+        valid, error = check_bash_directory_boundary(cmd, self.cwd, self.approved)
+        assert valid
+        assert error is None
+
+    def test_multiline_with_background_and_redirects_inside_approved(self) -> None:
+        """Real production command: cd, background job, stdout/stderr/stdin
+        redirects, disown, sleep+cat — all inside the approved dir."""
+        cmd = (
+            "cd /srv/claude-bot/workspace/claude-tg-bot\n"
+            "setsid nohup bash tools/update.sh > .engine/update.log 2>&1 < /dev/null &\n"
+            "disown 2>/dev/null || true\n"
+            "sleep 5; cat .engine/update.log"
+        )
+        valid, error = check_bash_directory_boundary(cmd, self.cwd, self.approved)
+        assert valid
+        assert error is None
+
+    def test_stdin_redirect_target_outside_approved_is_not_flagged(self) -> None:
+        """``< /dev/null`` must not be checked as a path argument of the
+        preceding command — it targets stdin, not the filesystem."""
+        cmd = "cd subdir < /dev/null"
+        valid, error = check_bash_directory_boundary(cmd, self.cwd, self.approved)
+        assert valid
+        assert error is None
+
+    def test_stdout_redirect_target_outside_approved_is_not_flagged(self) -> None:
+        cmd = "touch file.txt > /dev/null 2>&1"
+        valid, error = check_bash_directory_boundary(cmd, self.cwd, self.approved)
+        assert valid
+        assert error is None
+
+    def test_real_cd_after_redirect_outside_is_still_blocked(self) -> None:
+        """The redirect exemption must not swallow a genuine later violation."""
+        cmd = "touch file.txt > /dev/null && cd /tmp"
+        valid, error = check_bash_directory_boundary(cmd, self.cwd, self.approved)
+        assert not valid
+        assert "/tmp" in error
+
+    def test_heredoc_body_is_not_parsed_as_shell_tokens(self) -> None:
+        """Paths written inside a heredoc (Python source piped to stdin) are
+        data for the child process, not filesystem arguments of any bash
+        command in the surrounding script."""
+        cmd = (
+            "cd /srv/claude-bot/workspace/claude-tg-bot\n"
+            "python3 - <<'PY'\n"
+            "import pathlib\n"
+            "p = pathlib.Path('/etc/passwd')\n"
+            "print(p)\n"
+            "PY\n"
+            "echo done"
+        )
+        valid, error = check_bash_directory_boundary(cmd, self.cwd, self.approved)
+        assert valid
+        assert error is None
+
+    def test_heredoc_does_not_hide_a_real_violation_after_it(self) -> None:
+        cmd = (
+            "python3 - <<'PY'\n"
+            "print('hello')\n"
+            "PY\n"
+            "mkdir /etc/evil"
+        )
+        valid, error = check_bash_directory_boundary(cmd, self.cwd, self.approved)
+        assert not valid
+        assert "/etc/evil" in error
+
+    def test_heredoc_does_not_hide_a_real_violation_before_it(self) -> None:
+        cmd = (
+            "mkdir /etc/evil\n"
+            "python3 - <<'PY'\n"
+            "print('hello')\n"
+            "PY"
+        )
+        valid, error = check_bash_directory_boundary(cmd, self.cwd, self.approved)
+        assert not valid
+        assert "/etc/evil" in error
+
+    def test_multiple_mkdir_new_project_folders_pass(self) -> None:
+        """The original complaint: creating a brand-new project folder."""
+        cmd = (
+            "mkdir -p /srv/claude-bot/workspace/new-project && "
+            "cd /srv/claude-bot/workspace/new-project && git init"
+        )
+        valid, error = check_bash_directory_boundary(cmd, self.cwd, self.approved)
+        assert valid
+        assert error is None
+
+
 class TestIsClaudeInternalPath:
     """Test the _is_claude_internal_path helper function."""
 

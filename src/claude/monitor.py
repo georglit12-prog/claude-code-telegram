@@ -1,5 +1,6 @@
 """Bash directory boundary enforcement for Claude tool calls."""
 
+import re
 import shlex
 from pathlib import Path
 from typing import Optional, Set, Tuple
@@ -65,8 +66,53 @@ _READ_ONLY_COMMANDS: Set[str] = {
 # Actions / expressions that make ``find`` a filesystem-modifying command
 _FIND_MUTATING_ACTIONS: Set[str] = {"-delete", "-exec", "-execdir", "-ok", "-okdir"}
 
-# Bash command separators
-_COMMAND_SEPARATORS: Set[str] = {"&&", "||", ";", "|", "&"}
+# Bash command separators. A newline separates commands exactly like ``;``
+# does — Claude routinely sends multi-line scripts, and without this a
+# perfectly normal second line is parsed as more arguments to the first.
+_COMMAND_SEPARATORS: Set[str] = {"&&", "||", ";", "|", "&", "\n"}
+
+# Redirection operators. The token *after* one of these is a filename for
+# I/O redirection (``> out.log``, ``2>&1``, ``< /dev/null``), never a
+# filesystem argument of the command itself — ``cd foo > /dev/null`` does
+# not touch ``/dev/null`` as a directory. We drop the operator and skip the
+# very next token when scanning for paths.
+_REDIRECT_OPERATORS: Set[str] = {">", ">>", "<", "<>", "2>", "2>>", "&>", "&>>"}
+
+# Matches a heredoc/herestring start such as ``<<'PY'``, ``<<EOF`` or
+# ``<<- "EOF"``: the operator, optional ``-``, optional quotes, and the
+# delimiter word. Everything up to the matching end-of-line delimiter is
+# data piped to the command's stdin (Python source, JSON, …), not shell
+# syntax — paths mentioned inside it are not filesystem arguments of any
+# bash command and must not be checked or chained into the surrounding one.
+_HEREDOC_START_RE = re.compile(r"<<-?\s*(['\"]?)(\w+)\1")
+
+
+def _strip_heredocs(command: str) -> str:
+    """Remove heredoc bodies from *command*, replacing each with a placeholder.
+
+    Operates line by line so a delimiter word appearing later as plain text
+    (e.g. inside a normal argument) can't be mistaken for the start of a new
+    heredoc once we're already inside one.
+    """
+    out_lines: list[str] = []
+    lines = command.split("\n")
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        match = _HEREDOC_START_RE.search(line)
+        if match:
+            delimiter = match.group(2)
+            # Keep everything on the start line up to the heredoc operator —
+            # it may itself contain a real command (``cmd <<'EOF'``).
+            out_lines.append(line[: match.start()])
+            i += 1
+            while i < len(lines) and lines[i].strip() != delimiter:
+                i += 1
+            i += 1  # skip the delimiter line itself
+        else:
+            out_lines.append(line)
+            i += 1
+    return "\n".join(out_lines)
 
 
 def check_bash_directory_boundary(
@@ -75,14 +121,27 @@ def check_bash_directory_boundary(
     approved_directory: Path,
 ) -> Tuple[bool, Optional[str]]:
     """Check if a bash command's paths stay within the approved directory."""
-    try:
-        tokens = shlex.split(command)
-    except ValueError:
-        # If we can't parse the command, let it through —
-        # the sandbox will catch it at the OS level
-        return True, None
+    command = _strip_heredocs(command)
 
-    if not tokens:
+    # shlex treats newlines as ordinary whitespace, same as spaces, so a
+    # multi-line script would otherwise collapse into one giant argument
+    # list — Line 2 of ``cd proj\nsleep 5`` would look like more arguments
+    # to ``cd``. Splitting per line first keeps each line's own tokens
+    # together; ``\n`` is then also a separator (see _COMMAND_SEPARATORS)
+    # so command chains still can't cross line boundaries.
+    tokens: list[str] = []
+    for line in command.split("\n"):
+        try:
+            line_tokens = shlex.split(line, comments=False)
+        except ValueError:
+            # Malformed quoting on this line (e.g. an unbalanced quote that
+            # continues on the next line). Let it through — the sandbox
+            # catches it at the OS level — rather than mis-tokenize it.
+            return True, None
+        tokens.extend(line_tokens)
+        tokens.append("\n")
+
+    if not tokens or not any(t != "\n" for t in tokens):
         return True, None
 
     # Split tokens into individual commands based on separators
@@ -124,7 +183,23 @@ def check_bash_directory_boundary(
             continue
 
         # Check each argument for paths outside the boundary
+        skip_next = False
         for token in cmd_tokens[1:]:
+            if skip_next:
+                # This token is a redirection target (``> file``, ``< file``,
+                # ``2>&1``), not a filesystem argument of the command itself.
+                skip_next = False
+                continue
+            if token in _REDIRECT_OPERATORS:
+                skip_next = True
+                continue
+            # A combined form like ``2>file`` or ``>out.log`` with no space —
+            # shlex keeps it as one token, so there is nothing further to
+            # check on this token; it targets stderr/stdout redirection, not
+            # a real path argument of the command.
+            if re.fullmatch(r"\d*(>>?|<>?)\S*", token):
+                continue
+
             # Skip flags
             if token.startswith("-"):
                 continue
