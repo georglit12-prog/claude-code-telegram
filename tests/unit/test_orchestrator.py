@@ -232,7 +232,7 @@ async def test_agentic_start_has_keyboard(agentic_settings, deps):
     labels = [b.text for row in markup.inline_keyboard for b in row]
     assert any("проект" in t.lower() for t in labels)
     assert any("модель" in t.lower() for t in labels)
-    assert any("пользоваться" in t.lower() for t in labels)
+    assert any("помощь" in t.lower() for t in labels)
     # Contains user name
     assert "Alice" in call_kwargs.args[0]
 
@@ -273,8 +273,9 @@ async def test_agentic_status_shows_settings(agentic_settings, deps):
     text = call_args.args[0]
     # Статус показывает проект, разговор и текущие настройки
     assert "Разговор" in text and "новая" in text
-    assert "Модель" in text
-    assert "Режим" in text
+    # Настройки идут одной строкой: модель · режим · глубина
+    assert "opus" in text
+    assert "авто" in text
 
 
 async def test_agentic_text_calls_claude(agentic_settings, deps):
@@ -286,6 +287,9 @@ async def test_agentic_text_calls_claude(agentic_settings, deps):
     mock_response.session_id = "session-abc"
     mock_response.content = "Hello, I can help with that!"
     mock_response.tools_used = []
+    # Задача доведена до конца: иначе MagicMock сам по себе «истина»,
+    # и итоговая подпись считает работу прерванной.
+    mock_response.interrupted = False
 
     claude_integration = AsyncMock()
     claude_integration.run_command = AsyncMock(return_value=mock_response)
@@ -320,16 +324,20 @@ async def test_agentic_text_calls_claude(agentic_settings, deps):
     # Session ID updated
     assert context.user_data["claude_session_id"] == "session-abc"
 
-    # Progress message deleted
-    progress_msg.delete.assert_called_once()
+    # Карточка работы не удаляется, а становится итоговой подписью
+    progress_msg.delete.assert_not_called()
+    final_card = progress_msg.edit_text.call_args.args[0]
+    assert "Готово" in final_card
 
-    # Response sent without keyboard (reply_markup=None)
+    # Под последним куском ответа — ряд быстрых действий
     response_calls = [
         c
         for c in update.message.reply_text.call_args_list
         if c != update.message.reply_text.call_args_list[0]
     ]
-    for call in response_calls:
+    assert response_calls
+    assert response_calls[-1].kwargs.get("reply_markup") is not None
+    for call in response_calls[:-1]:
         assert call.kwargs.get("reply_markup") is None
 
 

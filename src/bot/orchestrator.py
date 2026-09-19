@@ -123,8 +123,10 @@ def _tool_label(name: str) -> str:
 
 
 # Кадры «живого» индикатора: меняются на каждом обновлении сообщения,
-# поэтому сразу видно, что бот не завис.
-_SPINNER = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+# поэтому сразу видно, что бот не завис. Песочные часы вместо брайлевских
+# точек: на телефоне точки читаются как мусор, а переворачивающиеся часы
+# понятны без объяснений.
+_SPINNER = ("⏳", "⌛")
 
 
 def _human_elapsed(seconds: float) -> str:
@@ -136,6 +138,18 @@ def _human_elapsed(seconds: float) -> str:
     if rest == 0:
         return f"{minutes} мин"
     return f"{minutes} мин {rest} сек"
+
+
+def _plural_steps(count: int) -> str:
+    """Склонение к числу действий: 1 действие, 2 действия, 5 действий."""
+    if 11 <= count % 100 <= 14:
+        return "действий"
+    last = count % 10
+    if last == 1:
+        return "действие"
+    if last in (2, 3, 4):
+        return "действия"
+    return "действий"
 
 
 # Tool name -> friendly emoji mapping for verbose output
@@ -520,16 +534,16 @@ class MessageOrchestrator:
         if self.settings.agentic_mode:
             commands = [
                 BotCommand("start", "Начать работу"),
-                BotCommand("new", "Забыть разговор и начать заново"),
-                BotCommand("status", "Что сейчас: проект и настройки"),
+                BotCommand("new", "Заново: забыть разговор"),
+                BotCommand("status", "Проект и настройки"),
                 BotCommand("verbose", "Подробность отчёта: 0, 1 или 2"),
-                BotCommand("repo", "Сменить проект"),
-                BotCommand("usage", "Лимиты и расход"),
+                BotCommand("repo", "Проекты: выбрать другой"),
+                BotCommand("usage", "Расход и лимиты"),
                 BotCommand("help", "Как пользоваться ботом"),
-                BotCommand("newproject", "Создать новый проект"),
-                BotCommand("model", "Какая модель: умнее или быстрее"),
-                BotCommand("mode", "Как работать: сразу или сначала план"),
-                BotCommand("effort", "Как глубоко думать"),
+                BotCommand("newproject", "Новый проект с нуля"),
+                BotCommand("model", "Модель: умнее или быстрее"),
+                BotCommand("mode", "Режим: сразу делать или сначала план"),
+                BotCommand("effort", "Глубина проработки"),
                 BotCommand("restart", "Перезапустить бота, если завис"),
                 BotCommand("sync", "Отправить правки на GitHub"),
             ]
@@ -577,26 +591,28 @@ class MessageOrchestrator:
         "На компьютере они появятся после <code>git pull</code>.\n"
         "\n"
         "<b>Пока я работаю</b>\n"
-        "Крутится индикатор и растёт время — значит всё идёт. "
-        "Ниже видно, что именно я делаю. Если передумали — кнопка "
-        "«Остановить».\n"
+        "Сверху висит карточка: часы, время и последние действия. Пока она "
+        "живая — работа идёт. Закончу — карточка станет «✅ Готово», а сразу "
+        "под ней придёт ответ. Передумали — кнопка «⏹ Остановить».\n"
         "\n"
-        "<b>Кнопки</b>\n"
-        "📂 <b>Сменить проект</b> — выбрать, с чем работаем\n"
-        "✨ <b>Создать проект</b> — новый проект с нуля\n"
-        "🧠 <b>Какая модель</b> — умнее или быстрее\n"
-        "⚙️ <b>Как работать</b> — сразу делать или сначала показать план\n"
-        "🎯 <b>Как глубоко</b> — тщательность против скорости\n"
-        "📊 <b>Что сейчас</b> — текущие настройки\n"
-        "📈 <b>Лимиты и расход</b> — сколько задач и токенов потрачено\n"
-        "🔄 <b>Забыть разговор</b> — начать с чистого листа\n"
+        "<b>Кнопки под ответом</b>\n"
+        "☁️ <b>В GitHub</b> — отправить сделанное, чтобы забрать на компьютере\n"
+        "🔄 <b>Заново</b> — забыть разговор и начать с чистого листа\n"
+        "☰ <b>Меню</b> — проекты и настройки\n"
+        "\n"
+        "<b>Меню</b>\n"
+        "📂 <b>Проекты</b> · ✨ <b>Новый</b> — выбрать или завести проект\n"
+        "🧠 <b>Модель</b> — умнее или быстрее\n"
+        "⚙️ <b>Режим</b> — сразу делать или сначала показать план\n"
+        "🎚 <b>Глубина</b> — тщательность против скорости\n"
+        "📈 <b>Расход</b> — сколько задач и токенов потрачено\n"
         "\n"
         "<b>Когда что выбирать</b>\n"
-        "• Крупная переделка — сначала «Как работать → план», посмотрите "
+        "• Крупная переделка — сначала «Режим → план», посмотрите "
         "замысел, потом верните «авто».\n"
-        "• Мелочь вроде опечатки — «Какая модель → sonnet», будет быстрее.\n"
-        "• Запутанная ошибка — «Как глубоко → max».\n"
-        "• Новая тема — «Забыть разговор», чтобы я не тянул старый контекст.\n"
+        "• Мелочь вроде опечатки — «Модель → sonnet», будет быстрее.\n"
+        "• Запутанная ошибка — «Глубина → max».\n"
+        "• Новая тема — «Заново», чтобы я не тянул старый разговор.\n"
         "\n"
         "<b>Что ещё умею</b>\n"
         "• Понимаю скриншоты — просто пришлите картинку\n"
@@ -605,7 +621,7 @@ class MessageOrchestrator:
         "\n"
         "<b>Если что-то не так</b>\n"
         "Долго молчу или завис — команда <code>/restart</code>.\n"
-        "Сделал не то — «Забыть разговор» и объясните заново."
+        "Сделал не то — «🔄 Заново» и объясните иначе."
     )
 
     @staticmethod
@@ -727,36 +743,70 @@ class MessageOrchestrator:
             )
         return "\n".join(lines)
 
+    @staticmethod
+    def _home_text(project: str, model: str, mode: str, effort: str) -> str:
+        """Шапка главного экрана: где мы и на чём работаем.
+
+        Один вид у /start, /status и кнопки «Меню» — человек привыкает к
+        одной картинке вместо трёх разных.
+        """
+        return (
+            f"📂 <b>{escape_html(project)}</b>\n"
+            f"<i>{escape_html(model)} · {escape_html(mode)} · "
+            f"{escape_html(effort)}</i>\n\n"
+            f"Напишите задачу словами — я сделаю."
+        )
+
     def _main_keyboard(self) -> InlineKeyboardMarkup:
         """Главные кнопки.
 
-        Подписи — по делу, а не по названию настройки: человек читает
-        «Сменить проект», а не «Проекты», и сразу понимает, что произойдёт.
+        Подписи — в одно-два слова. Длинные вроде «Забыть разговор» Telegram
+        ужимал шрифтом и обрезал, а три кнопки в ряд превращались в нечитаемую
+        полосу. Что делает каждая — написано в тексте над кнопками и в помощи.
         """
         return InlineKeyboardMarkup(
             [
                 [
-                    InlineKeyboardButton("📂 Сменить проект", callback_data="ui:repos"),
-                    InlineKeyboardButton("✨ Создать проект", callback_data="ui:newproject"),
+                    InlineKeyboardButton("📂 Проекты", callback_data="ui:repos"),
+                    InlineKeyboardButton("✨ Новый", callback_data="ui:newproject"),
                 ],
                 [
-                    InlineKeyboardButton("🧠 Какая модель", callback_data="ui:model"),
-                    InlineKeyboardButton("⚙️ Как работать", callback_data="ui:mode"),
-                    InlineKeyboardButton("🎯 Как глубоко", callback_data="ui:effort"),
+                    InlineKeyboardButton("🧠 Модель", callback_data="ui:model"),
+                    InlineKeyboardButton("⚙️ Режим", callback_data="ui:mode"),
+                    InlineKeyboardButton("🎚 Глубина", callback_data="ui:effort"),
                 ],
                 [
-                    InlineKeyboardButton("📊 Что сейчас", callback_data="ui:status"),
-                    InlineKeyboardButton("🔄 Забыть разговор", callback_data="ui:new"),
+                    InlineKeyboardButton("☁️ В GitHub", callback_data="ui:sync"),
+                    InlineKeyboardButton("🔄 Заново", callback_data="ui:new"),
                 ],
                 [
-                    InlineKeyboardButton("📈 Лимиты и расход", callback_data="ui:usage"),
-                    InlineKeyboardButton("❓ Как пользоваться", callback_data="ui:help"),
+                    InlineKeyboardButton("📈 Расход", callback_data="ui:usage"),
+                    InlineKeyboardButton("❓ Помощь", callback_data="ui:help"),
                 ],
             ]
         )
 
     def _back_row(self) -> List[InlineKeyboardButton]:
         return [InlineKeyboardButton("‹ Назад", callback_data="ui:home")]
+
+    @staticmethod
+    def _after_answer_keyboard() -> InlineKeyboardMarkup:
+        """Один ряд под готовым ответом: три действия, которые нужны чаще всего.
+
+        С телефона неудобно вспоминать команды, поэтому «отправить сделанное
+        на GitHub», «начать разговор заново» и «открыть меню» лежат прямо под
+        ответом. Кнопки отвечают новым сообщением, а не правят ответ — иначе
+        нажатие стирало бы то, что бот только что написал.
+        """
+        return InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("☁️ В GitHub", callback_data="ui:sync"),
+                    InlineKeyboardButton("🔄 Заново", callback_data="ui:reset"),
+                    InlineKeyboardButton("☰ Меню", callback_data="ui:menu"),
+                ]
+            ]
+        )
 
     def _model_keyboard(self, current: str) -> InlineKeyboardMarkup:
         rows = []
@@ -841,17 +891,13 @@ class MessageOrchestrator:
             current_dir = context.user_data.get("current_directory", self.settings.approved_directory)
             project = current_dir.name if current_dir != self.settings.approved_directory else "не выбран"
             await show(
-                f"📁 Проект: <b>{escape_html(project)}</b>\n"
-                f"🧠 Модель: <b>{escape_html(model)}</b> · "
-                f"Режим: <b>{mode_ru.get(mode, mode)}</b> · "
-                f"Глубина: <b>{escape_html(effort)}</b>\n\n"
-                f"Напишите задачу словами или выберите действие.",
+                self._home_text(project, model, mode_ru.get(mode, mode), effort),
                 self._main_keyboard(),
             )
 
         elif action == "repos":
             await query.answer()
-            await show("📁 <b>Проекты</b>\n\nВыберите, с чем работаем:", self._repos_keyboard())
+            await show("📂 <b>Проекты</b>\n\nВыберите, с чем работаем:", self._repos_keyboard())
 
         elif action == "model":
             await query.answer()
@@ -872,7 +918,7 @@ class MessageOrchestrator:
         elif action == "effort":
             await query.answer()
             await show(
-                "🎯 <b>Глубина проработки</b>\n\n"
+                "🎚 <b>Глубина проработки</b>\n\n"
                 "Чем выше, тем дольше думает и тем лучше результат.",
                 self._effort_keyboard(effort),
             )
@@ -900,7 +946,7 @@ class MessageOrchestrator:
             context.user_data["claude_effort"] = value
             await query.answer(f"Глубина: {value}")
             await show(
-                f"🎯 <b>Глубина проработки</b>\n\n"
+                f"🎚 <b>Глубина проработки</b>\n\n"
                 f"Выбрано: <b>{value}</b> — {escape_html(self.EFFORT_CHOICES[value])}",
                 self._effort_keyboard(value),
             )
@@ -911,12 +957,8 @@ class MessageOrchestrator:
             project = current_dir.name if current_dir != self.settings.approved_directory else "не выбран"
             session = "продолжается" if context.user_data.get("claude_session_id") else "новая"
             await show(
-                f"📊 <b>Сейчас</b>\n\n"
-                f"📁 Проект: <b>{escape_html(project)}</b>\n"
-                f"💬 Разговор: <b>{session}</b>\n"
-                f"🧠 Модель: <b>{escape_html(model)}</b>\n"
-                f"⚙️ Режим: <b>{mode_ru.get(mode, mode)}</b>\n"
-                f"🎯 Глубина: <b>{escape_html(effort)}</b>",
+                f"{self._home_text(project, model, mode_ru.get(mode, mode), effort)}"
+                f"\n\n💬 Разговор: <b>{session}</b>",
                 self._main_keyboard(),
             )
 
@@ -925,7 +967,10 @@ class MessageOrchestrator:
             context.user_data["session_started"] = True
             context.user_data["force_new_session"] = True
             await query.answer("Начинаем заново")
-            await show("🆕 <b>Начинаем заново</b>\n\nЧто делаем?", self._main_keyboard())
+            await show(
+                "🔄 <b>Начинаем заново</b>\n\nПрошлый разговор забыт. Что делаем?",
+                self._main_keyboard(),
+            )
 
         elif action == "usage":
             await query.answer()
@@ -934,6 +979,56 @@ class MessageOrchestrator:
         elif action == "help":
             await query.answer()
             await show(self.HELP_TEXT, InlineKeyboardMarkup([self._back_row()]))
+
+        elif action == "sync":
+            # Кнопка под ответом: отвечаем новым сообщением, ответ не трогаем.
+            await query.answer("Отправляю на GitHub…")
+            current_dir = context.user_data.get(
+                "current_directory", self.settings.approved_directory
+            )
+            if not self.project_sync.enabled:
+                note = "⚠️ Синхронизация с GitHub не настроена."
+            else:
+                note = await self.project_sync.push(current_dir) or (
+                    "☁️ Отправлять нечего — всё уже на GitHub."
+                )
+            try:
+                await query.message.reply_text(note)
+            except Exception:
+                logger.debug("Sync note send failed")
+
+        elif action == "reset":
+            context.user_data["claude_session_id"] = None
+            context.user_data["session_started"] = True
+            context.user_data["force_new_session"] = True
+            await query.answer("Начинаем заново")
+            try:
+                await query.message.reply_text(
+                    "🔄 <b>Начинаем заново</b>\n\n"
+                    "Прошлый разговор забыт. Что делаем?",
+                    parse_mode="HTML",
+                )
+            except Exception:
+                logger.debug("Reset note send failed")
+
+        elif action == "menu":
+            await query.answer()
+            current_dir = context.user_data.get(
+                "current_directory", self.settings.approved_directory
+            )
+            project = (
+                current_dir.name
+                if current_dir != self.settings.approved_directory
+                else "не выбран"
+            )
+            try:
+                await query.message.reply_text(
+                    self._home_text(project, model, mode_ru.get(mode, mode), effort),
+                    parse_mode="HTML",
+                    reply_markup=self._main_keyboard(),
+                )
+            except Exception:
+                logger.debug("Menu send failed")
 
         elif action == "newproject":
             await query.answer()
@@ -1004,12 +1099,11 @@ class MessageOrchestrator:
         }.get(mode, mode)
         project = current_dir.name if current_dir != self.settings.approved_directory else "не выбран"
 
+        effort = context.user_data.get("claude_effort") or "xhigh"
+
         await update.message.reply_text(
-            f"👋 Привет, {safe_name}!\n\n"
-            f"Напишите задачу обычными словами — я прочитаю код, внесу правки, "
-            f"выполню команды и сохраню изменения.\n\n"
-            f"📁 Проект: <b>{escape_html(project)}</b>\n"
-            f"🧠 Модель: <b>{escape_html(model)}</b> · Режим: <b>{mode_ru}</b>"
+            f"👋 <b>Привет, {safe_name}!</b>\n\n"
+            f"{self._home_text(project, model, mode_ru, effort)}"
             f"{sync_line}",
             parse_mode="HTML",
             reply_markup=self._main_keyboard(),
@@ -1024,7 +1118,8 @@ class MessageOrchestrator:
         context.user_data["force_new_session"] = True
 
         await update.message.reply_text(
-            "🆕 Начинаем заново. Что делаем?",
+            "🔄 <b>Начинаем заново</b>\n\nПрошлый разговор забыт. Что делаем?",
+            parse_mode="HTML",
             reply_markup=self._main_keyboard(),
         )
 
@@ -1052,12 +1147,8 @@ class MessageOrchestrator:
         effort = context.user_data.get("claude_effort") or "xhigh"
 
         await update.message.reply_text(
-            f"📊 <b>Сейчас</b>\n\n"
-            f"📁 Проект: <b>{escape_html(project)}</b>\n"
-            f"💬 Разговор: <b>{session_status}</b>\n"
-            f"🧠 Модель: <b>{escape_html(model)}</b>\n"
-            f"⚙️ Режим: <b>{mode_ru}</b>\n"
-            f"🎯 Глубина: <b>{escape_html(effort)}</b>",
+            f"{self._home_text(project, model, mode_ru, effort)}\n\n"
+            f"💬 Разговор: <b>{session_status}</b>",
             parse_mode="HTML",
             reply_markup=self._main_keyboard(),
         )
@@ -1210,7 +1301,7 @@ class MessageOrchestrator:
 
         if not args:
             await update.message.reply_text(
-                "🎯 <b>Глубина проработки</b>\n\n"
+                "🎚 <b>Глубина проработки</b>\n\n"
                 "Чем выше, тем дольше думает и тем лучше результат.",
                 parse_mode="HTML",
                 reply_markup=self._effort_keyboard(current),
@@ -1272,26 +1363,30 @@ class MessageOrchestrator:
         start_time: float,
         tick: int = 0,
     ) -> str:
-        """Сообщение о ходе работы.
+        """Карточка «что я сейчас делаю».
 
         Задача бота здесь — показать человеку, что он не завис: кадр индикатора
         меняется на каждом обновлении, время идёт, а последние действия названы
         по-человечески («читает config.py», а не «Read»).
+
+        Показываем только последние пять строк. Раньше их было двенадцать, и
+        сообщение прыгало по высоте на пол-экрана — читать бегущую простыню
+        невозможно, а счётчик действий в шапке говорит то же самое короче.
         """
         elapsed = time.time() - start_time
         spin = _SPINNER[tick % len(_SPINNER)]
+        steps = sum(1 for e in activity_log if e.get("kind") != "text")
+
         head = f"{spin} <b>Работаю</b> · {_human_elapsed(elapsed)}"
+        if steps:
+            head += f" · {steps} {_plural_steps(steps)}"
 
         if not activity_log:
             return head + "\n\n<i>обдумываю задачу…</i>"
 
         lines: List[str] = [head, ""]
 
-        shown = activity_log[-12:]
-        if len(activity_log) > len(shown):
-            lines.append(f"<i>…ранее ещё {len(activity_log) - len(shown)} шагов</i>")
-
-        for entry in shown:
+        for entry in activity_log[-5:]:
             kind = entry.get("kind", "tool")
             if kind == "text":
                 snippet = entry.get("detail", "") or ""
@@ -1311,6 +1406,29 @@ class MessageOrchestrator:
                     lines.append(f"{icon} {escape_html(label)}")
 
         return "\n".join(lines)
+
+    @staticmethod
+    def _finish_card(
+        activity_log: List[Dict[str, Any]],
+        start_time: float,
+        outcome: str = "done",
+    ) -> str:
+        """Одна строка на месте индикатора: работа закончена.
+
+        Раньше сообщение с индикатором просто удалялось, и ответ приходил
+        в чат ничем не отмеченный — человек не понимал, где кончилась работа
+        и началась сама мысль. Теперь индикатор превращается в короткую
+        подпись, а ответ идёт сразу под ней.
+        """
+        elapsed = _human_elapsed(time.time() - start_time)
+        steps = sum(1 for e in activity_log if e.get("kind") != "text")
+        tail = f" · {steps} {_plural_steps(steps)}" if steps else ""
+
+        if outcome == "stopped":
+            return f"⏹ <b>Остановил</b> · {elapsed}{tail}"
+        if outcome == "failed":
+            return f"⚠️ <b>Не получилось</b> · {elapsed}{tail}"
+        return f"✅ <b>Готово</b> · {elapsed}{tail}"
 
     @staticmethod
     def _summarize_tool_input(tool_name: str, tool_input: Dict[str, Any]) -> str:
@@ -1439,8 +1557,9 @@ class MessageOrchestrator:
         if verbose_level == 0 and not need_mcp_intercept and draft_streamer is None:
             return None
 
-        last_edit_time = [0.0]  # mutable container for closure
-        tick = [0]  # кадр индикатора: меняется при каждом обновлении
+        # Карточку работы рисует отдельный тикер (_start_progress_ticker):
+        # здесь мы только собираем, что происходит, иначе два места правили бы
+        # одно сообщение наперегонки.
 
         async def _on_stream(update_obj: StreamUpdate) -> None:
             # Stop all streaming activity after interrupt
@@ -1474,12 +1593,6 @@ class MessageOrchestrator:
                         tool_log.append(
                             {"kind": "tool", "name": name, "detail": detail}
                         )
-                    if draft_streamer:
-                        icon = _tool_icon(name)
-                        line = (
-                            f"{icon} {name}: {detail}" if detail else f"{icon} {name}"
-                        )
-                        await draft_streamer.append_tool(line)
 
             # Capture assistant text (reasoning / commentary)
             if update_obj.type == "assistant" and update_obj.content:
@@ -1491,32 +1604,14 @@ class MessageOrchestrator:
                             tool_log.append(
                                 {"kind": "text", "detail": first_line[:120]}
                             )
-                        if draft_streamer:
-                            await draft_streamer.append_tool(
-                                f"\U0001f4ac {first_line[:120]}"
-                            )
 
-            # Stream text to user via draft (prefer token deltas;
-            # skip full assistant messages to avoid double-appending)
+            # Черновик показывает только сам ответ, как он пишется.
+            # Технические строки вроде «Read: config.py» отсюда убраны:
+            # они мелькали латиницей поверх текста и мешали читать. Что
+            # именно делает бот, видно в карточке работы выше.
             if draft_streamer and update_obj.content:
                 if update_obj.type == "stream_delta":
                     await draft_streamer.append_text(update_obj.content)
-
-            # Throttle progress message edits to avoid Telegram rate limits
-            if not draft_streamer and verbose_level >= 1:
-                now = time.time()
-                if (now - last_edit_time[0]) >= 2.0:
-                    last_edit_time[0] = now
-                    tick[0] += 1
-                    new_text = self._format_verbose_progress(
-                        tool_log, verbose_level, start_time, tick[0]
-                    )
-                    try:
-                        await progress_msg.edit_text(
-                            new_text, reply_markup=reply_markup, parse_mode="HTML"
-                        )
-                    except Exception:
-                        pass
 
         return _on_stream
 
@@ -1714,15 +1809,21 @@ class MessageOrchestrator:
         heartbeat = self._start_typing_heartbeat(chat)
         # Живой индикатор: двигается даже когда Claude долго думает молча,
         # иначе сообщение замирает и кажется, что бот завис.
+        #
+        # Раньше тикер не запускался при включённом стриминге черновиков —
+        # и карточка застывала на «0 сек · обдумываю задачу…» на всю задачу.
+        # Это две разные вещи: черновик показывает текст ответа, карточка —
+        # что бот жив и чем занят.
         ticker = (
             self._start_progress_ticker(
                 progress_msg, tool_log, verbose_level, start_time, stop_kb
             )
-            if verbose_level >= 1 and draft_streamer is None
+            if verbose_level >= 1
             else None
         )
 
         success = True
+        interrupted = False
         try:
             claude_response = await claude_integration.run_command(
                 prompt=message_text,
@@ -1766,10 +1867,9 @@ class MessageOrchestrator:
             formatter = ResponseFormatter(self.settings)
 
             response_content = claude_response.content
-            if claude_response.interrupted:
-                response_content = (
-                    response_content or ""
-                ) + "\n\n_(остановлено вами)_"
+            interrupted = bool(claude_response.interrupted)
+            # Пометка «остановлено» теперь стоит в карточке над ответом,
+            # приписывать её к тексту не нужно.
 
             formatted_messages = formatter.format_claude_response(response_content)
 
@@ -1793,10 +1893,19 @@ class MessageOrchestrator:
                 except Exception:
                     logger.debug("Draft flush failed in finally block", user_id=user_id)
 
+        # Индикатор превращается в подпись «✅ Готово · 2 мин · 12 действий».
+        # Она остаётся в чате над ответом и служит границей: выше — работа,
+        # ниже — сам ответ. Раньше сообщение удалялось, и ответ приходил
+        # ничем не отмеченный — глазу не за что было зацепиться.
+        outcome = "failed" if not success else ("stopped" if interrupted else "done")
         try:
-            await progress_msg.delete()
+            await progress_msg.edit_text(
+                self._finish_card(tool_log, start_time, outcome),
+                reply_markup=None,
+                parse_mode="HTML",
+            )
         except Exception:
-            logger.debug("Failed to delete progress message, ignoring")
+            logger.debug("Failed to finalize progress message, ignoring")
 
         # Use MCP-collected images (from send_image_to_user tool calls)
         images: List[ImageAttachment] = mcp_images
@@ -1819,6 +1928,7 @@ class MessageOrchestrator:
 
         # Send text messages (skip if caption was already embedded in photos)
         if not caption_sent:
+            last_index = len(formatted_messages) - 1
             for i, message in enumerate(formatted_messages):
                 if not message.text or not message.text.strip():
                     continue
@@ -1826,7 +1936,13 @@ class MessageOrchestrator:
                     await update.message.reply_text(
                         message.text,
                         parse_mode=message.parse_mode,
-                        reply_markup=None,  # No keyboards in agentic mode
+                        # Ряд действий — только под последним куском ответа,
+                        # чтобы кнопки не повторялись посреди длинного текста.
+                        reply_markup=(
+                            self._after_answer_keyboard()
+                            if i == last_index and success
+                            else None
+                        ),
                         reply_to_message_id=(
                             update.message.message_id if i == 0 else None
                         ),

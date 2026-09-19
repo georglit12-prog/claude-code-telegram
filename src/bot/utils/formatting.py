@@ -37,34 +37,32 @@ class ResponseFormatter:
     def format_claude_response(
         self, text: str, context: Optional[dict] = None
     ) -> List[FormattedMessage]:
-        """Enhanced formatting with context awareness and semantic chunking."""
+        """Ответ Claude — одним связным текстом, разрезанным только по длине.
+
+        Раньше сложные ответы шли через семантическую нарезку: она резала текст
+        по типам содержимого и подписывала куски заголовками «Code» и «File
+        Operations». В личном боте это читалось как каша из обрывков — человек
+        терял, где ответ, а где служебная подпись. Теперь ответ остаётся целым,
+        а если не влезает в одно сообщение Telegram, части нумеруются.
+        """
         # Clean and prepare text
         text = self._clean_text(text)
-
-        # Check if we need semantic chunking (for complex content)
-        if self._should_use_semantic_chunking(text):
-            # Use enhanced semantic chunking for complex content
-            chunks = self._semantic_chunk(text, context)
-            messages = []
-            for chunk in chunks:
-                formatted = self._format_chunk(chunk)
-                messages.extend(formatted)
-        else:
-            # Use original simple formatting for basic content
-            text = self._format_code_blocks(text)
-            messages = self._split_message(text)
-
-        # Add context-aware quick actions to the last message
-        if messages and self.settings.enable_quick_actions:
-            messages[-1].reply_markup = self._get_contextual_keyboard(context)
+        text = self._format_code_blocks(text)
+        messages = self._split_message(text)
 
         # Filter out any empty messages produced by formatting/splitting
         messages = [m for m in messages if m.text and m.text.strip()]
 
+        # Длинный ответ: видно, что это продолжение, а не новый ответ.
+        total = len(messages)
+        if total > 1:
+            for number, message in enumerate(messages[1:], start=2):
+                message.text = (
+                    f"<i>продолжение · {number}/{total}</i>\n\n{message.text}"
+                )
+
         return (
-            messages
-            if messages
-            else [FormattedMessage("<i>(No content to display)</i>")]
+            messages if messages else [FormattedMessage("<i>(ответ пришёл пустым)</i>")]
         )
 
     def _should_use_semantic_chunking(self, text: str) -> bool:
