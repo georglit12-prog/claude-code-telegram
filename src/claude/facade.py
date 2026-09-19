@@ -40,7 +40,7 @@ class ClaudeIntegration:
         force_new: bool = False,
         interrupt_event: Optional["asyncio.Event"] = None,
         images: Optional[List[Dict[str, str]]] = None,
-        overrides: Optional[Dict[str, str]] = None,
+        overrides: Optional[Dict[str, Any]] = None,
     ) -> ClaudeResponse:
         """Run Claude Code command with full integration."""
         logger.info(
@@ -162,7 +162,7 @@ class ClaudeIntegration:
         stream_callback: Optional[Callable] = None,
         interrupt_event: Optional[asyncio.Event] = None,
         images: Optional[List[Dict[str, str]]] = None,
-        overrides: Optional[Dict[str, str]] = None,
+        overrides: Optional[Dict[str, Any]] = None,
     ) -> ClaudeResponse:
         """Execute command via SDK."""
         return await self.sdk_manager.execute_command(

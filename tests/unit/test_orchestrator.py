@@ -4,11 +4,11 @@ import asyncio
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import ANY, AsyncMock, MagicMock
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.bot.orchestrator import MessageOrchestrator, _redact_secrets
+from src.bot.orchestrator import ActiveRequest, MessageOrchestrator, _redact_secrets
 from src.config import create_test_config
 
 
@@ -103,10 +103,11 @@ def test_agentic_registers_commands(agentic_settings, deps):
     ]
     commands = [h[0][0].commands for h in cmd_handlers]
 
-    assert len(cmd_handlers) == 13
+    assert len(cmd_handlers) == 15
     for name in (
         "start", "new", "status", "verbose", "repo", "restart",
         "help", "usage", "newproject", "model", "mode", "effort", "sync",
+        "stop", "web",
     ):
         assert frozenset({name}) in commands, f"нет команды /{name}"
 
@@ -165,7 +166,8 @@ async def test_agentic_bot_commands(agentic_settings, deps):
     cmd_names = [c.command for c in commands]
     assert cmd_names == [
         "start", "new", "status", "verbose", "repo",
-        "usage", "help", "newproject", "model", "mode", "effort", "restart", "sync",
+        "usage", "help", "newproject", "model", "mode", "effort",
+        "stop", "web", "restart", "sync",
     ]
 
 
@@ -209,7 +211,7 @@ async def test_restart_command_sends_sigterm(deps):
 
 
 async def test_agentic_start_has_keyboard(agentic_settings, deps):
-    """Agentic /start sends brief message without inline keyboard."""
+    """Приветствие ставит нижнюю клавиатуру с быстрыми действиями."""
     orchestrator = MessageOrchestrator(agentic_settings, deps)
 
     update = MagicMock()
@@ -226,13 +228,14 @@ async def test_agentic_start_has_keyboard(agentic_settings, deps):
 
     update.message.reply_text.assert_called_once()
     call_kwargs = update.message.reply_text.call_args
-    # Приветствие теперь с кнопками быстрого доступа
+    # Приветствие ставит нижнюю клавиатуру: с неё доступны частые действия,
+    # а во время работы на её месте появляется «Остановить».
     markup = call_kwargs.kwargs.get("reply_markup")
     assert markup is not None
-    labels = [b.text for row in markup.inline_keyboard for b in row]
-    assert any("проект" in t.lower() for t in labels)
-    assert any("модель" in t.lower() for t in labels)
-    assert any("помощь" in t.lower() for t in labels)
+    labels = [b.text for row in markup.keyboard for b in row]
+    assert MessageOrchestrator.BTN_SYNC in labels
+    assert MessageOrchestrator.BTN_RESET in labels
+    assert MessageOrchestrator.BTN_MENU in labels
     # Contains user name
     assert "Alice" in call_kwargs.args[0]
 
@@ -1106,7 +1109,7 @@ async def test_agentic_sync_command_pushes_and_reports(agentic_settings, deps):
 
     orchestrator.project_sync.push.assert_awaited_once_with(project_dir)
     update.message.reply_text.assert_awaited_once_with(
-        "☁️ Отправлено на GitHub: 2 файла", reply_markup=None
+        "☁️ Отправлено на GitHub: 2 файла"
     )
 
 
@@ -1126,7 +1129,7 @@ async def test_agentic_sync_command_reports_nothing_to_send(agentic_settings, de
     await orchestrator.agentic_sync(update, context)
 
     update.message.reply_text.assert_awaited_once_with(
-        "Отправлять нечего — всё уже на GitHub.", reply_markup=None
+        "☁️ Отправлять нечего — всё уже на GitHub."
     )
 
 
@@ -1148,3 +1151,116 @@ async def test_agentic_sync_command_disabled(agentic_settings, deps):
     orchestrator.project_sync.push.assert_not_awaited()
     update.message.reply_text.assert_awaited_once()
     assert "не настроена" in update.message.reply_text.call_args.args[0]
+
+
+# --- Нижняя клавиатура: остановка, интернет, расход ---------------------
+
+
+async def test_keyboard_stop_interrupts_request(agentic_settings, deps):
+    """Кнопка «Остановить» с нижней клавиатуры прерывает работающую задачу."""
+    orchestrator = MessageOrchestrator(agentic_settings, deps)
+
+    event = asyncio.Event()
+    progress_msg = AsyncMock()
+    orchestrator._active_requests[100] = ActiveRequest(
+        user_id=100, interrupt_event=event, progress_msg=progress_msg
+    )
+
+    update = MagicMock()
+    update.effective_user.id = 100
+    update.message.text = MessageOrchestrator.BTN_STOP
+    update.message.delete = AsyncMock()
+    update.effective_chat.send_message = AsyncMock()
+
+    context = MagicMock()
+    context.user_data = {}
+
+    handled = await orchestrator._handle_keyboard_button(update, context)
+
+    assert handled is True
+    assert event.is_set()
+    # Карточка сразу говорит, что остановка пошла
+    assert "Останавливаю" in progress_msg.edit_text.await_args.args[0]
+    # Само нажатие убрано из переписки, лишних сообщений нет
+    update.message.delete.assert_awaited_once()
+    update.effective_chat.send_message.assert_not_awaited()
+
+
+async def test_keyboard_stop_without_task_restores_keyboard(agentic_settings, deps):
+    """Когда останавливать нечего, бот говорит об этом и возвращает клавиатуру."""
+    orchestrator = MessageOrchestrator(agentic_settings, deps)
+
+    update = MagicMock()
+    update.effective_user.id = 100
+    update.message.text = MessageOrchestrator.BTN_STOP
+    update.message.delete = AsyncMock()
+    update.effective_chat.send_message = AsyncMock()
+
+    context = MagicMock()
+    context.user_data = {}
+
+    assert await orchestrator._handle_keyboard_button(update, context) is True
+
+    call = update.effective_chat.send_message.await_args
+    assert "нечего останавливать" in call.args[0]
+    labels = [b.text for row in call.kwargs["reply_markup"].keyboard for b in row]
+    assert MessageOrchestrator.BTN_MENU in labels
+
+
+async def test_plain_text_is_not_treated_as_button(agentic_settings, deps):
+    """Обычная задача не путается с нажатием кнопки."""
+    orchestrator = MessageOrchestrator(agentic_settings, deps)
+
+    update = MagicMock()
+    update.message.text = "поправь заголовок на главной"
+    context = MagicMock()
+    context.user_data = {}
+
+    assert await orchestrator._handle_keyboard_button(update, context) is False
+
+
+async def test_web_toggle_frees_web_tools(agentic_settings, deps):
+    """Включённый интернет снимает запрет только с веб-инструментов."""
+    orchestrator = MessageOrchestrator(agentic_settings, deps)
+    orchestrator.settings.claude_disallowed_tools = ["WebFetch", "WebSearch", "Bash"]
+
+    context = MagicMock()
+    context.user_data = {}
+
+    # По умолчанию запрет из настроек не трогаем вовсе
+    assert "disallowed_tools" not in orchestrator._user_overrides(context)
+
+    context.user_data["web_enabled"] = True
+    overrides = orchestrator._user_overrides(context)
+    assert overrides["disallowed_tools"] == ["Bash"]
+
+
+async def test_usage_text_has_bars(agentic_settings, deps):
+    """Экран расхода рисует полоски, а не голые числа."""
+    from datetime import datetime, timedelta, timezone
+
+    orchestrator = MessageOrchestrator(agentic_settings, deps)
+    now = datetime.now(timezone.utc)
+    with patch.object(
+        MessageOrchestrator,
+        "_collect_usage",
+        staticmethod(
+            lambda: {
+                "day_tokens": 1200, "week_tokens": 3400, "all_tokens": 9000,
+                "day_requests": 3, "week_requests": 9, "all_requests": 20,
+                "window_requests": 2, "window_tokens": 800,
+                "window_start": now - timedelta(hours=2),
+                "last_seen": now, "by_model": {"claude-opus-5": 8000},
+                "by_day": {now.date().isoformat(): 1200},
+            }
+        ),
+    ):
+        context = MagicMock()
+        context.user_data = {}
+        text = orchestrator._usage_text(context)
+
+    assert "▰" in text and "▱" in text
+    assert "Окно подписки" in text
+    assert "обновится через 2 ч" in text  # пять часов минус два прошедших
+    assert "2 задачи" in text
+    assert "По дням" in text and "По моделям" in text

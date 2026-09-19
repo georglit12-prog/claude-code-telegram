@@ -20,6 +20,8 @@ from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     InputMediaPhoto,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
     Update,
 )
 from telegram.ext import (
@@ -140,16 +142,37 @@ def _human_elapsed(seconds: float) -> str:
     return f"{minutes} мин {rest} сек"
 
 
-def _plural_steps(count: int) -> str:
-    """Склонение к числу действий: 1 действие, 2 действия, 5 действий."""
+def _human_left(seconds: float) -> str:
+    """Сколько осталось: 2 ч 05 мин, 45 мин, меньше минуты."""
+    total = int(max(seconds, 0))
+    if total < 60:
+        return "меньше минуты"
+    hours, rest = divmod(total // 60, 60)
+    if hours:
+        return f"{hours} ч {rest:02d} мин"
+    return f"{rest} мин"
+
+
+def _plural(count: int, one: str, few: str, many: str) -> str:
+    """Русское склонение к числу: 1 задача, 2 задачи, 5 задач."""
     if 11 <= count % 100 <= 14:
-        return "действий"
+        return many
     last = count % 10
     if last == 1:
-        return "действие"
+        return one
     if last in (2, 3, 4):
-        return "действия"
-    return "действий"
+        return few
+    return many
+
+
+def _plural_steps(count: int) -> str:
+    """Склонение к числу действий: 1 действие, 2 действия, 5 действий."""
+    return _plural(count, "действие", "действия", "действий")
+
+
+def _plural_tasks(count: int) -> str:
+    """Склонение к числу задач: 1 задача, 2 задачи, 5 задач."""
+    return _plural(count, "задача", "задачи", "задач")
 
 
 # Tool name -> friendly emoji mapping for verbose output
@@ -398,6 +421,8 @@ class MessageOrchestrator:
             ("effort", self.agentic_effort),
             ("restart", command.restart_command),
             ("sync", self.agentic_sync),
+            ("stop", self.agentic_stop),
+            ("web", self.agentic_web),
         ]
         if self.settings.enable_project_threads:
             handlers.append(("sync_threads", command.sync_threads))
@@ -544,6 +569,8 @@ class MessageOrchestrator:
                 BotCommand("model", "Модель: умнее или быстрее"),
                 BotCommand("mode", "Режим: сразу делать или сначала план"),
                 BotCommand("effort", "Глубина проработки"),
+                BotCommand("stop", "Остановить текущую задачу"),
+                BotCommand("web", "Интернет: включить или выключить"),
                 BotCommand("restart", "Перезапустить бота, если завис"),
                 BotCommand("sync", "Отправить правки на GitHub"),
             ]
@@ -593,9 +620,16 @@ class MessageOrchestrator:
         "<b>Пока я работаю</b>\n"
         "Сверху висит карточка: часы, время и последние действия. Пока она "
         "живая — работа идёт. Закончу — карточка станет «✅ Готово», а сразу "
-        "под ней придёт ответ. Передумали — кнопка «⏹ Остановить».\n"
+        "под ней придёт ответ.\n"
         "\n"
-        "<b>Кнопки под ответом</b>\n"
+        "<b>Как остановить</b>\n"
+        "Внизу экрана, под полем ввода, на время работы появляется одна "
+        "кнопка — «⏹ Остановить». Она никуда не уезжает, нажать можно в "
+        "любой момент. То же самое делает команда <code>/stop</code>. "
+        "Я дожму текущее действие и остановлюсь — сделанное до этого "
+        "останется.\n"
+        "\n"
+        "<b>Кнопки внизу экрана</b>\n"
         "☁️ <b>В GitHub</b> — отправить сделанное, чтобы забрать на компьютере\n"
         "🔄 <b>Заново</b> — забыть разговор и начать с чистого листа\n"
         "☰ <b>Меню</b> — проекты и настройки\n"
@@ -605,7 +639,8 @@ class MessageOrchestrator:
         "🧠 <b>Модель</b> — умнее или быстрее\n"
         "⚙️ <b>Режим</b> — сразу делать или сначала показать план\n"
         "🎚 <b>Глубина</b> — тщательность против скорости\n"
-        "📈 <b>Расход</b> — сколько задач и токенов потрачено\n"
+        "📈 <b>Расход</b> — полоски: окно подписки, дни, модели\n"
+        "🌐 <b>Интернет</b> — разрешить мне искать и читать страницы\n"
         "\n"
         "<b>Когда что выбирать</b>\n"
         "• Крупная переделка — сначала «Режим → план», посмотрите "
@@ -643,7 +678,8 @@ class MessageOrchestrator:
         stats = {
             "day_tokens": 0, "week_tokens": 0, "all_tokens": 0,
             "day_requests": 0, "week_requests": 0, "all_requests": 0,
-            "window_requests": 0, "last_seen": None, "by_model": {},
+            "window_requests": 0, "window_tokens": 0, "window_start": None,
+            "last_seen": None, "by_model": {}, "by_day": {},
         }
 
         pattern = str(Path.home() / ".claude" / "projects" / "**" / "*.jsonl")
@@ -683,11 +719,23 @@ class MessageOrchestrator:
                         if ts >= week_ago:
                             stats["week_tokens"] += tokens
                             stats["week_requests"] += 1
+                            day_key = ts.date().isoformat()
+                            stats["by_day"][day_key] = (
+                                stats["by_day"].get(day_key, 0) + tokens
+                            )
                         if ts >= day_ago:
                             stats["day_tokens"] += tokens
                             stats["day_requests"] += 1
                         if ts >= five_hours_ago:
                             stats["window_requests"] += 1
+                            stats["window_tokens"] += tokens
+                            # Лимит подписки обновляется через пять часов после
+                            # первой задачи в окне — её и запоминаем.
+                            if (
+                                stats["window_start"] is None
+                                or ts < stats["window_start"]
+                            ):
+                                stats["window_start"] = ts
             except Exception:
                 continue
 
@@ -702,8 +750,36 @@ class MessageOrchestrator:
             return f"{n / 1_000:.0f} тыс."
         return str(n)
 
+    @staticmethod
+    def _short_model(name: str) -> str:
+        """claude-haiku-4-5 → haiku 4.5, claude-opus-5 → opus 5."""
+        short = name.replace("claude-", "")
+        short = re.sub(r"-(\d+)-(\d+)$", r" \1.\2", short)
+        return re.sub(r"-(\d+)$", r" \1", short)
+
+    @staticmethod
+    def _bar(share: float, width: int = 12) -> str:
+        """Полоска заполнения: ▰▰▰▰▱▱▱▱▱▱▱▱.
+
+        Обе половинки одной ширины, поэтому полоска остаётся ровной и вне
+        моноширинного блока.
+        """
+        share = max(0.0, min(1.0, share))
+        filled = int(round(share * width))
+        # Ненулевой расход не должен выглядеть как пустая строка.
+        if share > 0 and filled == 0:
+            filled = 1
+        return "▰" * filled + "▱" * (width - filled)
+
     def _usage_text(self, context: ContextTypes.DEFAULT_TYPE) -> str:
-        """Сообщение про лимиты и расход."""
+        """Экран расхода: полоски вместо голых чисел.
+
+        Точного остатка лимита подписки боту никто не сообщает, поэтому
+        показываем то, что известно наверняка: сколько прошло от пятичасового
+        окна, сколько потрачено по дням и на какие модели.
+        """
+        from datetime import datetime, timedelta, timezone
+
         st = self._collect_usage()
         model = (
             context.user_data.get("claude_model")
@@ -711,36 +787,84 @@ class MessageOrchestrator:
             or "opus"
         )
 
-        lines = [
-            "📈 <b>Лимиты и расход</b>",
-            "",
-            "<b>За сегодня</b>",
-            f"  задач: {st['day_requests']} · токенов: {self._fmt_tokens(st['day_tokens'])}",
-            "<b>За неделю</b>",
-            f"  задач: {st['week_requests']} · токенов: {self._fmt_tokens(st['week_tokens'])}",
-            "<b>За всё время</b>",
-            f"  задач: {st['all_requests']} · токенов: {self._fmt_tokens(st['all_tokens'])}",
-        ]
+        lines = ["📈 <b>Расход</b>", ""]
 
+        # --- Окно подписки: сколько его прошло ---
+        window = timedelta(hours=5)
+        start = st["window_start"]
+        if start is not None:
+            passed = datetime.now(timezone.utc) - start
+            left = window - passed
+            left_text = _human_left(left.total_seconds())
+            share = passed.total_seconds() / window.total_seconds()
+            lines += [
+                f"<b>Окно подписки</b> · обновится через {left_text}",
+                f"{self._bar(share)}  {int(round(share * 100))}%",
+                f"{st['window_requests']} {_plural_tasks(st['window_requests'])} · "
+                f"{self._fmt_tokens(st['window_tokens'])} токенов",
+            ]
+        else:
+            lines += [
+                "<b>Окно подписки</b> · чистое",
+                f"{self._bar(0.0)}  0%",
+                "за последние 5 часов задач не было",
+            ]
+
+        # --- По дням недели ---
+        if st["by_day"]:
+            today = datetime.now(timezone.utc).date()
+            rows = []
+            peak = max(st["by_day"].values()) or 1
+            # Сверху свежее: сегодня, вчера, дальше в прошлое.
+            for offset in range(0, 7):
+                day = today - timedelta(days=offset)
+                tokens = st["by_day"].get(day.isoformat(), 0)
+                if offset == 0:
+                    label = "сегодня"
+                elif offset == 1:
+                    label = "вчера"
+                else:
+                    label = day.strftime("%d.%m")
+                rows.append((label, tokens, tokens / peak))
+
+            width = max(len(r[0]) for r in rows)
+            block = [
+                f"{label.ljust(width)}  {self._bar(share, 10)}  "
+                f"{self._fmt_tokens(tokens) if tokens else '—'}"
+                for label, tokens, share in rows
+            ]
+            lines += ["", "<b>По дням</b>", "<pre>" + "\n".join(block) + "</pre>"]
+
+        # --- По моделям ---
         if st["by_model"]:
-            lines += ["", "<b>По моделям</b>"]
-            for name, tok in sorted(st["by_model"].items(), key=lambda x: -x[1])[:4]:
-                short = name.replace("claude-", "").replace("-5", " 5").replace("-4-5", " 4.5")
-                lines.append(f"  {escape_html(short)}: {self._fmt_tokens(tok)}")
+            total = sum(st["by_model"].values()) or 1
+            top = sorted(st["by_model"].items(), key=lambda x: -x[1])[:4]
+            names = [self._short_model(name) for name, _ in top]
+            width = max(len(n) for n in names)
+            block = [
+                f"{escape_html(short.ljust(width))}  "
+                f"{self._bar(tokens / total, 10)}  "
+                f"{int(round(tokens / total * 100))}%"
+                for (_, tokens), short in zip(top, names)
+            ]
+            lines += [
+                "",
+                "<b>По моделям</b> <i>за всё время</i>",
+                "<pre>" + "\n".join(block) + "</pre>",
+            ]
 
         lines += [
             "",
+            f"Всего за неделю: {st['week_requests']} "
+            f"{_plural_tasks(st['week_requests'])} · "
+            f"{self._fmt_tokens(st['week_tokens'])} токенов.",
             f"Сейчас работаем на модели <b>{escape_html(model)}</b>.",
             "",
             "<i>Точный остаток лимита подписки виден только в приложении "
-            "Claude и на claude.ai — у бота нет к нему доступа. Если лимит "
-            "закончится, я отвечу ошибкой и скажу, когда он обновится.</i>",
+            "Claude и на claude.ai — у бота нет к нему доступа. Полоска окна "
+            "показывает время до обновления лимита, а не сколько его "
+            "осталось.</i>",
         ]
-        if st["window_requests"] >= 1:
-            lines.append(
-                f"\n<i>Лимиты подписки обновляются раз в 5 часов. "
-                f"За последние 5 часов: {st['window_requests']} задач.</i>"
-            )
         return "\n".join(lines)
 
     @staticmethod
@@ -781,6 +905,7 @@ class MessageOrchestrator:
                 ],
                 [
                     InlineKeyboardButton("📈 Расход", callback_data="ui:usage"),
+                    InlineKeyboardButton("🌐 Интернет", callback_data="ui:web"),
                     InlineKeyboardButton("❓ Помощь", callback_data="ui:help"),
                 ],
             ]
@@ -789,23 +914,140 @@ class MessageOrchestrator:
     def _back_row(self) -> List[InlineKeyboardButton]:
         return [InlineKeyboardButton("‹ Назад", callback_data="ui:home")]
 
-    @staticmethod
-    def _after_answer_keyboard() -> InlineKeyboardMarkup:
-        """Один ряд под готовым ответом: три действия, которые нужны чаще всего.
+    async def _interrupt_active_request(self, user_id: int) -> str:
+        """Прервать работающую задачу. Возвращает, что сказать человеку."""
+        active = self._active_requests.get(user_id)
+        if not active:
+            return "Сейчас нечего останавливать."
+        if active.interrupted:
+            return "Уже останавливаю…"
 
-        С телефона неудобно вспоминать команды, поэтому «отправить сделанное
-        на GitHub», «начать разговор заново» и «открыть меню» лежат прямо под
-        ответом. Кнопки отвечают новым сообщением, а не правят ответ — иначе
-        нажатие стирало бы то, что бот только что написал.
+        active.interrupt_event.set()
+        active.interrupted = True
+        try:
+            await active.progress_msg.edit_text(
+                "⏹ <b>Останавливаю…</b>\n\n<i>дожидаюсь, пока закончится "
+                "текущее действие</i>",
+                reply_markup=None,
+                parse_mode="HTML",
+            )
+        except Exception:
+            logger.debug("Failed to update card on interrupt")
+        return "Останавливаю…"
+
+    async def _handle_keyboard_button(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> bool:
+        """Нажата кнопка нижней клавиатуры? Тогда выполнить её и сказать «да».
+
+        Telegram присылает такие нажатия обычным текстом, поэтому их нужно
+        отличить от задачи раньше, чем текст уйдёт Claude.
         """
-        return InlineKeyboardMarkup(
+        text = (update.message.text or "").strip()
+        if text not in (self.BTN_STOP, self.BTN_SYNC, self.BTN_RESET, self.BTN_MENU):
+            return False
+
+        chat = update.effective_chat
+        # Само нажатие — служебное, в переписке ему делать нечего.
+        try:
+            await update.message.delete()
+        except Exception:
+            logger.debug("Failed to delete keyboard button message")
+
+        if text == self.BTN_STOP:
+            note = await self._interrupt_active_request(update.effective_user.id)
+            if note != "Останавливаю…":
+                await chat.send_message(note, reply_markup=self._idle_keyboard())
+
+        elif text == self.BTN_SYNC:
+            await chat.send_message(await self._sync_push_text(context))
+
+        elif text == self.BTN_RESET:
+            context.user_data["claude_session_id"] = None
+            context.user_data["session_started"] = True
+            context.user_data["force_new_session"] = True
+            await chat.send_message(
+                "🔄 <b>Начинаем заново</b>\n\nПрошлый разговор забыт. Что делаем?",
+                parse_mode="HTML",
+            )
+
+        else:  # BTN_MENU
+            current_dir = context.user_data.get(
+                "current_directory", self.settings.approved_directory
+            )
+            project = (
+                current_dir.name
+                if current_dir != self.settings.approved_directory
+                else "не выбран"
+            )
+            model = (
+                context.user_data.get("claude_model")
+                or self.settings.claude_model
+                or "opus"
+            )
+            mode = context.user_data.get("permission_mode") or "bypassPermissions"
+            mode_ru = {
+                "plan": "план",
+                "acceptEdits": "правки",
+                "default": "обычный",
+                "bypassPermissions": "авто",
+            }.get(mode, mode)
+            effort = context.user_data.get("claude_effort") or "xhigh"
+            await chat.send_message(
+                self._home_text(project, model, mode_ru, effort),
+                parse_mode="HTML",
+                reply_markup=self._main_keyboard(),
+            )
+
+        return True
+
+    async def _sync_push_text(self, context: ContextTypes.DEFAULT_TYPE) -> str:
+        """Отправить проект на GitHub и вернуть, что из этого вышло."""
+        if not self.project_sync.enabled:
+            return "⚠️ Синхронизация с GitHub не настроена."
+        current_dir = context.user_data.get(
+            "current_directory", self.settings.approved_directory
+        )
+        note = await self.project_sync.push(current_dir)
+        return note or "☁️ Отправлять нечего — всё уже на GitHub."
+
+    # Подписи кнопок нижней клавиатуры. Нажатие приходит обычным текстом,
+    # поэтому подписи заодно служат опознавательными знаками — см.
+    # _handle_keyboard_button.
+    BTN_STOP = "⏹ Остановить"
+    BTN_SYNC = "☁️ В GitHub"
+    BTN_RESET = "🔄 Заново"
+    BTN_MENU = "☰ Меню"
+
+    @classmethod
+    def _working_keyboard(cls) -> ReplyKeyboardMarkup:
+        """Клавиатура на время работы: одна кнопка «Остановить».
+
+        Inline-кнопка на карточке уезжает вверх, как только Telegram
+        показывает черновик с текстом ответа, — искать её посреди работы
+        неудобно. Нижняя клавиатура висит под полем ввода и не двигается:
+        видно, что задача идёт, и остановить можно в любой момент, как
+        кнопкой Stop в редакторе.
+        """
+        return ReplyKeyboardMarkup(
+            [[KeyboardButton(cls.BTN_STOP)]],
+            resize_keyboard=True,
+            is_persistent=True,
+        )
+
+    @classmethod
+    def _idle_keyboard(cls) -> ReplyKeyboardMarkup:
+        """Клавиатура в покое: три действия, которые нужны чаще всего."""
+        return ReplyKeyboardMarkup(
             [
                 [
-                    InlineKeyboardButton("☁️ В GitHub", callback_data="ui:sync"),
-                    InlineKeyboardButton("🔄 Заново", callback_data="ui:reset"),
-                    InlineKeyboardButton("☰ Меню", callback_data="ui:menu"),
+                    KeyboardButton(cls.BTN_SYNC),
+                    KeyboardButton(cls.BTN_RESET),
+                    KeyboardButton(cls.BTN_MENU),
                 ]
-            ]
+            ],
+            resize_keyboard=True,
+            is_persistent=True,
         )
 
     def _model_keyboard(self, current: str) -> InlineKeyboardMarkup:
@@ -980,18 +1222,23 @@ class MessageOrchestrator:
             await query.answer()
             await show(self.HELP_TEXT, InlineKeyboardMarkup([self._back_row()]))
 
+        elif action == "web":
+            await query.answer()
+            await show(
+                self._web_text(self._web_enabled(context)),
+                self._web_keyboard(self._web_enabled(context)),
+            )
+
+        elif action == "setweb":
+            enabled = value == "on"
+            context.user_data["web_enabled"] = enabled
+            await query.answer("Интернет включён" if enabled else "Интернет выключен")
+            await show(self._web_text(enabled), self._web_keyboard(enabled))
+
         elif action == "sync":
             # Кнопка под ответом: отвечаем новым сообщением, ответ не трогаем.
             await query.answer("Отправляю на GitHub…")
-            current_dir = context.user_data.get(
-                "current_directory", self.settings.approved_directory
-            )
-            if not self.project_sync.enabled:
-                note = "⚠️ Синхронизация с GitHub не настроена."
-            else:
-                note = await self.project_sync.push(current_dir) or (
-                    "☁️ Отправлять нечего — всё уже на GitHub."
-                )
+            note = await self._sync_push_text(context)
             try:
                 await query.message.reply_text(note)
             except Exception:
@@ -1101,12 +1348,17 @@ class MessageOrchestrator:
 
         effort = context.user_data.get("claude_effort") or "xhigh"
 
+        # Приветствие ставит нижнюю клавиатуру — с неё начинается всё
+        # остальное: «☰ Меню» открывает настройки, а во время работы на её
+        # месте появляется «⏹ Остановить».
         await update.message.reply_text(
             f"👋 <b>Привет, {safe_name}!</b>\n\n"
-            f"{self._home_text(project, model, mode_ru, effort)}"
+            f"{self._home_text(project, model, mode_ru, effort)}\n\n"
+            f"<i>Кнопки внизу экрана: отправить сделанное на GitHub, начать "
+            f"разговор заново, открыть меню.</i>"
             f"{sync_line}",
             parse_mode="HTML",
-            reply_markup=self._main_keyboard(),
+            reply_markup=self._idle_keyboard(),
         )
 
     async def agentic_new(
@@ -1165,6 +1417,15 @@ class MessageOrchestrator:
             out["permission_mode"] = context.user_data["permission_mode"]
         if context.user_data.get("claude_effort"):
             out["effort"] = context.user_data["claude_effort"]
+        if self._web_enabled(context):
+            # Снимаем запрет только с веб-инструментов, остальные запреты
+            # из настроек бота остаются в силе.
+            blocked = [
+                tool
+                for tool in (self.settings.claude_disallowed_tools or [])
+                if tool not in self.WEB_TOOLS
+            ]
+            out["disallowed_tools"] = blocked
         return out
 
     def _get_verbose_level(self, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1493,12 +1754,17 @@ class MessageOrchestrator:
         start_time: float,
         reply_markup: Optional[InlineKeyboardMarkup],
         interval: float = 4.0,
+        interrupt_event: Optional[asyncio.Event] = None,
     ) -> "asyncio.Task[None]":
         """Двигать индикатор, даже когда от Claude ничего не приходит.
 
         Claude может несколько минут обдумывать задачу, не вызывая инструментов.
         Без этого сообщение замирало бы, и казалось бы, что бот завис.
         Здесь же меняется кадр и растёт время работы.
+
+        После нажатия «Остановить» тикер замолкает: иначе он через пару секунд
+        затирал надпись «Останавливаю…» обратно на «Работаю», и человек решал,
+        что кнопка не сработала.
         """
 
         async def _ticker() -> None:
@@ -1507,6 +1773,8 @@ class MessageOrchestrator:
             try:
                 while True:
                     await asyncio.sleep(interval)
+                    if interrupt_event is not None and interrupt_event.is_set():
+                        return
                     frame += 1
                     text = self._format_verbose_progress(
                         tool_log, verbose_level, start_time, frame
@@ -1622,6 +1890,7 @@ class MessageOrchestrator:
         reply_to_message_id: Optional[int] = None,
         caption: Optional[str] = None,
         caption_parse_mode: Optional[str] = None,
+        reply_markup: Optional[ReplyKeyboardMarkup] = None,
     ) -> bool:
         """Send extracted images as a media group (album) or documents.
 
@@ -1654,6 +1923,7 @@ class MessageOrchestrator:
                             reply_to_message_id=reply_to_message_id,
                             caption=caption if use_caption else None,
                             parse_mode=caption_parse_mode if use_caption else None,
+                            reply_markup=reply_markup,
                         )
                     caption_sent = use_caption
                 else:
@@ -1717,6 +1987,14 @@ class MessageOrchestrator:
         сообщений в python-telegram-bot неизменяемые, подменить текст нельзя.
         """
         user_id = update.effective_user.id
+
+        # Нажатие нижней клавиатуры приходит обычным текстом — разбираем его
+        # здесь, иначе «⏹ Остановить» уехало бы Claude как новая задача.
+        if prompt_override is None and await self._handle_keyboard_button(
+            update, context
+        ):
+            return
+
         message_text = prompt_override or update.message.text
 
         logger.info(
@@ -1738,14 +2016,16 @@ class MessageOrchestrator:
 
         verbose_level = self._get_verbose_level(context)
 
-        # Create Stop button and interrupt event
         interrupt_event = asyncio.Event()
-        stop_kb = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("⏹ Остановить", callback_data=f"stop:{user_id}")]]
-        )
+
+        # Карточка работы несёт нижнюю клавиатуру с одной кнопкой
+        # «Остановить»: она висит под полем ввода всё время работы и никуда
+        # не уезжает, в отличие от кнопки внутри сообщения. Поэтому inline-
+        # разметки у карточки нет — тикер правит её текст с reply_markup=None.
+        stop_kb = None
         progress_msg = await update.message.reply_text(
             f"{_SPINNER[0]} <b>Работаю</b> · 0 сек\n\n<i>обдумываю задачу…</i>",
-            reply_markup=stop_kb,
+            reply_markup=self._working_keyboard(),
             parse_mode="HTML",
         )
 
@@ -1816,7 +2096,12 @@ class MessageOrchestrator:
         # что бот жив и чем занят.
         ticker = (
             self._start_progress_ticker(
-                progress_msg, tool_log, verbose_level, start_time, stop_kb
+                progress_msg,
+                tool_log,
+                verbose_level,
+                start_time,
+                stop_kb,
+                interrupt_event=interrupt_event,
             )
             if verbose_level >= 1
             else None
@@ -1922,6 +2207,7 @@ class MessageOrchestrator:
                         reply_to_message_id=update.message.message_id,
                         caption=msg.text,
                         caption_parse_mode=msg.parse_mode,
+                        reply_markup=self._idle_keyboard(),
                     )
                 except Exception as img_err:
                     logger.warning("Image+caption send failed", error=str(img_err))
@@ -1936,12 +2222,11 @@ class MessageOrchestrator:
                     await update.message.reply_text(
                         message.text,
                         parse_mode=message.parse_mode,
-                        # Ряд действий — только под последним куском ответа,
-                        # чтобы кнопки не повторялись посреди длинного текста.
+                        # Нижняя клавиатура возвращается в покой на последнем
+                        # куске ответа: работа кончилась, «Остановить» больше
+                        # не нужно.
                         reply_markup=(
-                            self._after_answer_keyboard()
-                            if i == last_index and success
-                            else None
+                            self._idle_keyboard() if i == last_index else None
                         ),
                         reply_to_message_id=(
                             update.message.message_id if i == 0 else None
@@ -2425,22 +2710,90 @@ class MessageOrchestrator:
         except Exception as e:
             logger.warning("Failed to send sync note", error=str(e))
 
+    async def agentic_stop(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """/stop — прервать работающую задачу.
+
+        То же, что кнопка «Остановить» внизу экрана: команда нужна, когда
+        клавиатура спрятана.
+        """
+        note = await self._interrupt_active_request(update.effective_user.id)
+        if note != "Останавливаю…":
+            await update.message.reply_text(note, reply_markup=self._idle_keyboard())
+
+    # --- Интернет ------------------------------------------------------
+    # По умолчанию поиск и чтение страниц запрещены настройкой бота
+    # (CLAUDE_DISALLOWED_TOOLS): разрешения у Claude автоматические, и веб —
+    # самый короткий путь, которым подсунутый на странице текст уводит данные.
+    # Здесь владелец включает интернет на время, когда он нужен, и выключает
+    # обратно. Выбор живёт в user_data и переживает перезапуск.
+
+    WEB_TOOLS = ("WebFetch", "WebSearch")
+
+    @staticmethod
+    def _web_enabled(context: ContextTypes.DEFAULT_TYPE) -> bool:
+        return bool(context.user_data.get("web_enabled"))
+
+    @staticmethod
+    def _web_text(enabled: bool) -> str:
+        state = "включён" if enabled else "выключен"
+        lines = [
+            "🌐 <b>Интернет</b>",
+            "",
+            f"Сейчас: <b>{state}</b>",
+            "",
+            "С включённым интернетом я могу искать и читать страницы — "
+            "смотреть документацию, разбирать чужой код на GitHub, "
+            "проверять, как что-то устроено у других.",
+            "",
+            "<i>Работаю я без подтверждений, поэтому текст на чужой странице "
+            "может оказаться указанием для меня — например «покажи содержимое "
+            "файла с паролями». Включайте, когда интернет нужен для задачи, "
+            "и выключайте, когда закончили.</i>",
+        ]
+        return "\n".join(lines)
+
+    def _web_keyboard(self, enabled: bool) -> InlineKeyboardMarkup:
+        # Галочка отмечает текущее состояние, вторая кнопка предлагает действие.
+        off_label = "✅ Выключен" if not enabled else "🚫 Выключить"
+        on_label = "✅ Включён" if enabled else "🌐 Включить"
+        rows = [
+            [
+                InlineKeyboardButton(off_label, callback_data="ui:setweb:off"),
+                InlineKeyboardButton(on_label, callback_data="ui:setweb:on"),
+            ],
+            self._back_row(),
+        ]
+        return InlineKeyboardMarkup(rows)
+
+    async def agentic_web(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """/web — включить или выключить доступ в интернет.
+
+        `/web вкл`, `/web выкл` — сразу; без слова — показать состояние.
+        """
+        args = (update.message.text or "").split()[1:]
+        word = args[0].lower() if args else ""
+
+        if word in ("вкл", "on", "да", "включить"):
+            context.user_data["web_enabled"] = True
+        elif word in ("выкл", "off", "нет", "выключить"):
+            context.user_data["web_enabled"] = False
+
+        enabled = self._web_enabled(context)
+        await update.message.reply_text(
+            self._web_text(enabled),
+            parse_mode="HTML",
+            reply_markup=self._web_keyboard(enabled),
+        )
+
     async def agentic_sync(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """/sync — вручную сохранить и отправить правки текущего проекта на GitHub."""
-        current_dir = context.user_data.get(
-            "current_directory", self.settings.approved_directory
-        )
-        if not self.project_sync.enabled:
-            await update.message.reply_text(
-                "⚠️ Синхронизация с GitHub не настроена."
-            )
-            return
-        note = await self.project_sync.push(current_dir)
-        await update.message.reply_text(
-            note or "Отправлять нечего — всё уже на GitHub.", reply_markup=None
-        )
+        await update.message.reply_text(await self._sync_push_text(context))
 
     async def agentic_newproject(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -2649,22 +3002,8 @@ class MessageOrchestrator:
             )
             return
 
-        active = self._active_requests.get(target_user_id)
-        if not active:
-            await query.answer("Уже готово.", show_alert=False)
-            return
-        if active.interrupted:
-            await query.answer("Уже останавливаю…", show_alert=False)
-            return
-
-        active.interrupt_event.set()
-        active.interrupted = True
-        await query.answer("Останавливаю…", show_alert=False)
-
-        try:
-            await active.progress_msg.edit_text("⏹ Останавливаю…", reply_markup=None)
-        except Exception:
-            pass
+        note = await self._interrupt_active_request(target_user_id)
+        await query.answer(note, show_alert=False)
 
     async def _agentic_callback(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE

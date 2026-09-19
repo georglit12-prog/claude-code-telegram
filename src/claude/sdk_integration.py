@@ -320,12 +320,14 @@ class ClaudeSDKManager:
         stream_callback: Optional[Callable[[StreamUpdate], None]] = None,
         interrupt_event: Optional[asyncio.Event] = None,
         images: Optional[List[Dict[str, str]]] = None,
-        overrides: Optional[Dict[str, str]] = None,
+        overrides: Optional[Dict[str, Any]] = None,
     ) -> ClaudeResponse:
         """Execute Claude Code command via SDK.
 
-        overrides — выбор пользователя из команд /model, /mode, /effort.
-        Пусто = берём значения из настроек бота.
+        overrides — выбор пользователя из команд /model, /mode, /effort, /web.
+        Пусто = берём значения из настроек бота. Ключ ``disallowed_tools``
+        (список) заменяет запрет из настроек — им пользуется переключатель
+        интернета.
         """
         start_time = asyncio.get_event_loop().time()
 
@@ -376,6 +378,11 @@ class ClaudeSDKManager:
             else:
                 sdk_allowed_tools = self.config.claude_allowed_tools
                 sdk_disallowed_tools = self.config.claude_disallowed_tools
+                # Переключатель интернета в боте: список запрещённых
+                # инструментов на эту задачу задаёт пользователь.
+                override_disallowed = (overrides or {}).get("disallowed_tools")
+                if override_disallowed is not None:
+                    sdk_disallowed_tools = list(override_disallowed)
 
             # The can_use_tool callback below is purely reactive: the SDK only
             # invokes it when the CLI sends a can_use_tool control request, and

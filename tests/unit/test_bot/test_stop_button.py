@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
-from telegram import InlineKeyboardMarkup
+from telegram import ReplyKeyboardMarkup
 
 from src.bot.orchestrator import ActiveRequest, MessageOrchestrator
 from src.claude.sdk_integration import ClaudeResponse, ClaudeSDKManager
@@ -98,9 +98,9 @@ class TestStopCallback:
         assert event.is_set()
         assert active.interrupted is True
         query.answer.assert_awaited_once_with("Останавливаю…", show_alert=False)
-        progress_msg.edit_text.assert_awaited_once_with(
-            "⏹ Останавливаю…", reply_markup=None
-        )
+        card = progress_msg.edit_text.await_args
+        assert "Останавливаю" in card.args[0]
+        assert card.kwargs["reply_markup"] is None
 
     async def test_non_owner_blocked(self, orchestrator):
         """A different user cannot stop someone else's request."""
@@ -143,7 +143,9 @@ class TestStopCallback:
         # No active request registered
         await orchestrator._handle_stop_callback(update, context)
 
-        query.answer.assert_awaited_once_with("Уже готово.", show_alert=False)
+        query.answer.assert_awaited_once_with(
+            "Сейчас нечего останавливать.", show_alert=False
+        )
 
     async def test_double_stop_prevention(self, orchestrator):
         """Second click shows 'Уже останавливаю…' instead of re-firing."""
@@ -229,10 +231,11 @@ class TestStopButtonOnProgress:
         assert "Работаю" in first_call.args[0]
         reply_markup = first_call.kwargs.get("reply_markup")
         assert reply_markup is not None
-        assert isinstance(reply_markup, InlineKeyboardMarkup)
-        button = reply_markup.inline_keyboard[0][0]
-        assert button.text == "⏹ Остановить"
-        assert button.callback_data == f"stop:{user_id}"
+        # Кнопка «Остановить» живёт на нижней клавиатуре: inline-кнопка
+        # уезжала вверх вместе с карточкой, а эта висит под полем ввода.
+        assert isinstance(reply_markup, ReplyKeyboardMarkup)
+        button = reply_markup.keyboard[0][0]
+        assert button.text == MessageOrchestrator.BTN_STOP
 
     async def test_active_request_cleaned_up_after_success(
         self, orchestrator, settings
