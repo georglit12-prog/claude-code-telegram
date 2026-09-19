@@ -48,6 +48,11 @@ class Settings(BaseSettings):
     allowed_users: Optional[List[int]] = Field(
         None, description="Allowed Telegram user IDs"
     )
+    # Защита от кражи токена: с украденным токеном бота добавят в чужой чат,
+    # но там он работать не станет. Пусто — ограничение не применяется.
+    allowed_chat_ids: Optional[List[int]] = Field(
+        None, description="Chat IDs the bot is allowed to work in"
+    )
     enable_token_auth: bool = Field(
         False, description="Enable token-based authentication"
     )
@@ -339,7 +344,9 @@ class Settings(BaseSettings):
         env_file=".env", env_file_encoding="utf-8", case_sensitive=False, extra="ignore"
     )
 
-    @field_validator("allowed_users", "notification_chat_ids", mode="before")
+    @field_validator(
+        "allowed_users", "allowed_chat_ids", "notification_chat_ids", mode="before"
+    )
     @classmethod
     def parse_int_list(cls, v: Any) -> Optional[List[int]]:
         """Parse comma-separated integer lists."""

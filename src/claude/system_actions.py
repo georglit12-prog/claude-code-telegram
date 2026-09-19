@@ -82,6 +82,15 @@ _SYSTEM_COMMANDS: dict[str, Set[str]] = {
     "pkill": set(),
 }
 
+# Платёжный вебхук воронки. Смотреть его состояние (systemctl status,
+# логи, база) можно свободно, а вот прямой запрос на этот порт — это то,
+# чем можно изобразить поступившую оплату, поэтому спрашиваем.
+_PAYMENT_PORTS = ("8100",)
+_PAYMENT_HOSTS = ("127.0.0.1", "localhost", "0.0.0.0", "::1")
+
+# Команды, которые ходят по сети на местные службы.
+_NETWORK_CLIENTS: Set[str] = {"curl", "wget", "http", "nc", "ncat", "telnet"}
+
 # Команды, меняющие файлы. Для них проверяем, куда именно они пишут.
 _WRITING_COMMANDS: Set[str] = {
     "mkdir",
@@ -146,6 +155,19 @@ def classify_file_write(
     return f"запись вне рабочей папки: {_describe_path(str(resolved))}"
 
 
+def _targets_payment_webhook(tokens: list[str]) -> bool:
+    """Обращается ли команда к платёжному вебхуку воронки."""
+    for token in tokens[1:]:
+        for port in _PAYMENT_PORTS:
+            if f":{port}" not in token:
+                continue
+            # Порт совпал — убеждаемся, что это местный адрес, а не чужой
+            # сайт, у которого в URL случайно оказалось это число.
+            if any(host in token for host in _PAYMENT_HOSTS):
+                return True
+    return False
+
+
 def _classify_single(
     tokens: list[str],
     working_directory: Path,
@@ -179,6 +201,13 @@ def _classify_single(
             if probe & safe:
                 return None
         return f"системная команда: {' '.join(tokens)}"
+
+    # Прямой запрос к платёжному вебхуку.
+    if name in _NETWORK_CLIENTS and _targets_payment_webhook(tokens):
+        return (
+            "запрос к платёжному вебхуку воронки (порт 8100) — "
+            "через него воронка принимает уведомления об оплате"
+        )
 
     # Запись файлов — проверяем, куда.
     if name in _WRITING_COMMANDS:

@@ -17,6 +17,7 @@ from telegram import Update
 from telegram.ext import (
     AIORateLimiter,
     Application,
+    CallbackQueryHandler,
     ContextTypes,
     Defaults,
     MessageHandler,
@@ -171,7 +172,7 @@ class ClaudeCodeBot:
 
     def _add_middleware(self) -> None:
         """Add middleware to application."""
-        from .middleware.auth import auth_middleware
+        from .middleware.auth import auth_middleware, callback_auth_middleware
         from .middleware.rate_limit import rate_limit_middleware
         from .middleware.security import security_middleware
 
@@ -198,6 +199,16 @@ class ClaudeCodeBot:
                 filters.ALL, self._create_middleware_handler(rate_limit_middleware)
             ),
             group=-1,
+        )
+
+        # Нажатия кнопок приходят не сообщениями, поэтому MessageHandler выше
+        # их не видит. Без этой строки кнопку мог бы нажать кто угодно, кто
+        # её видит — включая подтверждение системного действия.
+        self.app.add_handler(
+            CallbackQueryHandler(
+                self._create_middleware_handler(callback_auth_middleware)
+            ),
+            group=-2,
         )
 
         logger.info("Middleware added to bot")

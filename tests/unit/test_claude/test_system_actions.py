@@ -185,3 +185,45 @@ class TestSudo:
 
     def test_sudo_with_safe_command_still_asks(self) -> None:
         assert classify_bash_command("sudo ls /srv", CWD, APPROVED) is not None
+
+
+class TestPaymentWebhook:
+    """Прямой запрос к вебхуку оплаты — вопрос; всё остальное местное — нет."""
+
+    def test_curl_to_payment_port_asks(self) -> None:
+        reason = classify_bash_command(
+            "curl -s http://127.0.0.1:8100/health", CWD, APPROVED
+        )
+        assert reason is not None
+        assert "8100" in reason
+        assert "оплат" in reason.lower()
+
+    def test_localhost_spelling_is_caught(self) -> None:
+        assert (
+            classify_bash_command("curl http://localhost:8100/webhook", CWD, APPROVED)
+            is not None
+        )
+
+    def test_other_local_ports_pass(self) -> None:
+        """Свои сайты и службы бот проверяет свободно."""
+        for cmd in [
+            "curl -s http://127.0.0.1:3001/",
+            "curl -I http://localhost:8080",
+            "wget -qO- http://127.0.0.1:5000/health",
+        ]:
+            assert classify_bash_command(cmd, CWD, APPROVED) is None, cmd
+
+    def test_external_url_with_same_number_passes(self) -> None:
+        """8100 в чужом URL — не наш вебхук."""
+        assert (
+            classify_bash_command("curl https://example.com/8100/page", CWD, APPROVED)
+            is None
+        )
+
+    def test_checking_payment_service_status_passes(self) -> None:
+        """Состояние оплаты смотреть можно без вопросов."""
+        for cmd in [
+            "systemctl status avtovydacha-webhook",
+            "journalctl -u avtovydacha-webhook -n 50",
+        ]:
+            assert classify_bash_command(cmd, CWD, APPROVED) is None, cmd
