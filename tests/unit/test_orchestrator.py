@@ -103,10 +103,10 @@ def test_agentic_registers_commands(agentic_settings, deps):
     ]
     commands = [h[0][0].commands for h in cmd_handlers]
 
-    assert len(cmd_handlers) == 12
+    assert len(cmd_handlers) == 13
     for name in (
         "start", "new", "status", "verbose", "repo", "restart",
-        "help", "usage", "newproject", "model", "mode", "effort",
+        "help", "usage", "newproject", "model", "mode", "effort", "sync",
     ):
         assert frozenset({name}) in commands, f"нет команды /{name}"
 
@@ -165,7 +165,7 @@ async def test_agentic_bot_commands(agentic_settings, deps):
     cmd_names = [c.command for c in commands]
     assert cmd_names == [
         "start", "new", "status", "verbose", "repo",
-        "usage", "help", "newproject", "model", "mode", "effort", "restart",
+        "usage", "help", "newproject", "model", "mode", "effort", "restart", "sync",
     ]
 
 
@@ -1033,8 +1033,8 @@ def _sync_update_and_context(agentic_settings, claude_integration):
     return update, context
 
 
-async def test_agentic_text_pulls_before_and_pushes_after(agentic_settings, deps):
-    """Перед задачей — pull, после ответа — push; их слова уходят в чат."""
+async def test_agentic_text_pulls_before_but_does_not_push_after(agentic_settings, deps):
+    """Перед задачей — pull; push сам по себе больше НЕ идёт, только по /sync."""
     orchestrator = MessageOrchestrator(agentic_settings, deps)
     orchestrator.project_sync.pull = AsyncMock(return_value="⬇️ Подтянул 1 коммит")
     orchestrator.project_sync.push = AsyncMock(return_value="☁️ Отправлено на GitHub: 1 файл")
@@ -1053,17 +1053,14 @@ async def test_agentic_text_pulls_before_and_pushes_after(agentic_settings, deps
     await orchestrator.agentic_text(update, context)
 
     orchestrator.project_sync.pull.assert_awaited_once_with(project_dir)
-    orchestrator.project_sync.push.assert_awaited_once_with(project_dir)
+    orchestrator.project_sync.push.assert_not_awaited()
     texts = [c.args[0] for c in update.message.reply_text.call_args_list]
     assert "⬇️ Подтянул 1 коммит" in texts
-    assert "☁️ Отправлено на GitHub: 1 файл" in texts
-    # pull — до ответа Claude, push — после
-    assert texts.index("⬇️ Подтянул 1 коммит") < texts.index("Готово")
-    assert texts.index("☁️ Отправлено на GitHub: 1 файл") > texts.index("Готово")
+    assert not any(t.startswith("☁️") for t in texts)
 
 
 async def test_agentic_text_sync_silent_when_nothing_to_say(agentic_settings, deps):
-    """Пустой ответ скрипта — никаких лишних сообщений в чате."""
+    """Пустой ответ pull — никаких лишних сообщений в чате."""
     orchestrator = MessageOrchestrator(agentic_settings, deps)
     orchestrator.project_sync.pull = AsyncMock(return_value="")
     orchestrator.project_sync.push = AsyncMock(return_value="")
@@ -1082,18 +1079,64 @@ async def test_agentic_text_sync_silent_when_nothing_to_say(agentic_settings, de
     texts = [c.args[0] for c in update.message.reply_text.call_args_list]
     assert texts.count("Готово") == 1
     assert not any(t.startswith(("⬇️", "☁️", "⚠️")) for t in texts)
+    orchestrator.project_sync.push.assert_not_awaited()
 
 
-async def test_agentic_text_no_push_when_claude_fails(agentic_settings, deps):
-    """Если Claude упал, ничего не отправляем: нечего сохранять."""
+async def test_agentic_sync_command_pushes_and_reports(agentic_settings, deps):
+    """/sync вручную отправляет правки текущего проекта и озвучивает результат."""
     orchestrator = MessageOrchestrator(agentic_settings, deps)
-    orchestrator.project_sync.pull = AsyncMock(return_value="")
-    orchestrator.project_sync.push = AsyncMock(return_value="☁️ не должно быть")
+    orchestrator.project_sync.script = "/fake/sync-project"
+    orchestrator.project_sync.push = AsyncMock(return_value="☁️ Отправлено на GitHub: 2 файла")
 
-    claude_integration = AsyncMock()
-    claude_integration.run_command = AsyncMock(side_effect=RuntimeError("boom"))
+    update = MagicMock()
+    update.message.reply_text = AsyncMock()
+    context = MagicMock()
+    project_dir = Path(agentic_settings.approved_directory) / "proj"
+    context.user_data = {"current_directory": project_dir}
 
-    update, context = _sync_update_and_context(agentic_settings, claude_integration)
-    await orchestrator.agentic_text(update, context)
+    await orchestrator.agentic_sync(update, context)
+
+    orchestrator.project_sync.push.assert_awaited_once_with(project_dir)
+    update.message.reply_text.assert_awaited_once_with(
+        "☁️ Отправлено на GitHub: 2 файла", reply_markup=None
+    )
+
+
+async def test_agentic_sync_command_reports_nothing_to_send(agentic_settings, deps):
+    """/sync без изменений отвечает понятной фразой, а не молчит."""
+    orchestrator = MessageOrchestrator(agentic_settings, deps)
+    orchestrator.project_sync.script = "/fake/sync-project"
+    orchestrator.project_sync.push = AsyncMock(return_value="")
+
+    update = MagicMock()
+    update.message.reply_text = AsyncMock()
+    context = MagicMock()
+    context.user_data = {
+        "current_directory": Path(agentic_settings.approved_directory) / "proj"
+    }
+
+    await orchestrator.agentic_sync(update, context)
+
+    update.message.reply_text.assert_awaited_once_with(
+        "Отправлять нечего — всё уже на GitHub.", reply_markup=None
+    )
+
+
+async def test_agentic_sync_command_disabled(agentic_settings, deps):
+    """Если синхронизация выключена, /sync честно об этом говорит и ничего не запускает."""
+    orchestrator = MessageOrchestrator(agentic_settings, deps)
+    orchestrator.project_sync.script = None
+    orchestrator.project_sync.push = AsyncMock()
+
+    update = MagicMock()
+    update.message.reply_text = AsyncMock()
+    context = MagicMock()
+    context.user_data = {
+        "current_directory": Path(agentic_settings.approved_directory) / "proj"
+    }
+
+    await orchestrator.agentic_sync(update, context)
 
     orchestrator.project_sync.push.assert_not_awaited()
+    update.message.reply_text.assert_awaited_once()
+    assert "не настроена" in update.message.reply_text.call_args.args[0]

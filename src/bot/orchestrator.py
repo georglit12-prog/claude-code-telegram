@@ -383,6 +383,7 @@ class MessageOrchestrator:
             ("mode", self.agentic_mode),
             ("effort", self.agentic_effort),
             ("restart", command.restart_command),
+            ("sync", self.agentic_sync),
         ]
         if self.settings.enable_project_threads:
             handlers.append(("sync_threads", command.sync_threads))
@@ -530,6 +531,7 @@ class MessageOrchestrator:
                 BotCommand("mode", "Как работать: сразу или сначала план"),
                 BotCommand("effort", "Как глубоко думать"),
                 BotCommand("restart", "Перезапустить бота, если завис"),
+                BotCommand("sync", "Отправить правки на GitHub"),
             ]
             if self.settings.enable_project_threads:
                 commands.append(BotCommand("sync_threads", "Sync project topics"))
@@ -1866,9 +1868,6 @@ class MessageOrchestrator:
                 except Exception as img_err:
                     logger.warning("Image send failed", error=str(img_err))
 
-        if success:
-            await self._sync_after_task(update, current_dir)
-
         # Audit log
         audit_logger = context.bot_data.get("audit_logger")
         if audit_logger:
@@ -2052,7 +2051,6 @@ class MessageOrchestrator:
                     except Exception as img_err:
                         logger.warning("Image send failed", error=str(img_err))
 
-            await self._sync_after_task(update, current_dir)
 
         except Exception as e:
             from .handlers.message import _format_error_message
@@ -2263,7 +2261,6 @@ class MessageOrchestrator:
                 except Exception as img_err:
                     logger.warning("Image send failed", error=str(img_err))
 
-        await self._sync_after_task(update, current_dir)
 
     async def _handle_unknown_command(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -2304,11 +2301,6 @@ class MessageOrchestrator:
         note = await self.project_sync.pull(current_dir)
         await self._send_sync_note(update, note)
 
-    async def _sync_after_task(self, update: Update, current_dir: Any) -> None:
-        """Сохранить и отправить правки на GitHub, отчитаться в чат."""
-        note = await self.project_sync.push(current_dir)
-        await self._send_sync_note(update, note)
-
     async def _send_sync_note(self, update: Update, note: str) -> None:
         if not note:
             return
@@ -2316,6 +2308,23 @@ class MessageOrchestrator:
             await update.message.reply_text(note, reply_markup=None)
         except Exception as e:
             logger.warning("Failed to send sync note", error=str(e))
+
+    async def agentic_sync(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """/sync — вручную сохранить и отправить правки текущего проекта на GitHub."""
+        current_dir = context.user_data.get(
+            "current_directory", self.settings.approved_directory
+        )
+        if not self.project_sync.enabled:
+            await update.message.reply_text(
+                "⚠️ Синхронизация с GitHub не настроена."
+            )
+            return
+        note = await self.project_sync.push(current_dir)
+        await update.message.reply_text(
+            note or "Отправлять нечего — всё уже на GitHub.", reply_markup=None
+        )
 
     async def agentic_newproject(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
