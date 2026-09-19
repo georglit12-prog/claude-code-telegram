@@ -1246,7 +1246,7 @@ async def restart_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     user_id = update.effective_user.id
 
     await update.message.reply_text(
-        "🔄 <b>Restarting bot…</b>\n\nBack shortly.",
+        "🔄 <b>Перезапускаюсь…</b>\n\nВернусь через пару секунд.",
         parse_mode="HTML",
     )
 

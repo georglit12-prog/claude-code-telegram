@@ -205,7 +205,7 @@ async def test_restart_command_sends_sigterm(deps):
     # Verify confirmation message was sent
     update.message.reply_text.assert_called_once()
     msg = update.message.reply_text.call_args[0][0]
-    assert "Restarting" in msg
+    assert "Перезапускаюсь" in msg
 
 
 async def test_agentic_start_has_keyboard(agentic_settings, deps):
