@@ -1453,14 +1453,19 @@ class MessageOrchestrator:
         )
 
     def _user_overrides(
-        self, context: ContextTypes.DEFAULT_TYPE, ask_server: Any = None
+        self,
+        context: ContextTypes.DEFAULT_TYPE,
+        ask_server: Any = None,
+        ask_channel: Any = None,
     ) -> dict:
         """Выбор пользователя из команд /model, /mode, /effort, /web.
 
         Пусто = работаем на значениях из настроек бота. ask_server — набор
         инструментов этой задачи (вопрос кнопками); он живёт только на время
         запроса и в user_data не кладётся: там persistence, а сервер не
-        сериализуется.
+        сериализуется. ask_channel — тот же канал напрямую: через него
+        спрашивается подтверждение системных действий (службы, /etc,
+        воронка с оплатой), до того как действие выполнится.
         """
         out: dict = {}
         if context.user_data.get("claude_model"):
@@ -1469,6 +1474,8 @@ class MessageOrchestrator:
             out["permission_mode"] = context.user_data["permission_mode"]
         if context.user_data.get("claude_effort"):
             out["effort"] = context.user_data["claude_effort"]
+        if ask_channel is not None:
+            out["ask_channel"] = ask_channel
         if ask_server is not None:
             out["mcp_servers"] = {"telegram": ask_server}
             out["extra_tools"] = [ASK_TOOL_NAME]
@@ -2191,7 +2198,9 @@ class MessageOrchestrator:
                 force_new=force_new,
                 interrupt_event=interrupt_event,
                 overrides=self._user_overrides(
-                    context, ask_server=build_ask_server(ask_channel)
+                    context,
+                    ask_server=build_ask_server(ask_channel),
+                    ask_channel=ask_channel,
                 ),
             )
 
@@ -2456,6 +2465,18 @@ class MessageOrchestrator:
 
         await self._sync_before_task(update, current_dir)
 
+        # Канал вопросов нужен и здесь: задача из файла может попросить
+        # системное действие ровно так же, как обычное сообщение. Канал
+        # кладётся в активные запросы — иначе нажатие кнопки его не найдёт
+        # и подтверждение зависнет до таймаута.
+        ask_channel = AskUserChannel(
+            bot=context.bot,
+            chat_id=chat.id,
+            message_thread_id=update.message.message_thread_id,
+        )
+        doc_request = ActiveRequest(user_id=user_id, ask_channel=ask_channel)
+        self._active_requests.setdefault(user_id, doc_request)
+
         heartbeat = self._start_typing_heartbeat(chat)
         try:
             claude_response = await claude_integration.run_command(
@@ -2465,7 +2486,7 @@ class MessageOrchestrator:
                 session_id=session_id,
                 on_stream=on_stream,
                 force_new=force_new,
-                overrides=self._user_overrides(context),
+                overrides=self._user_overrides(context, ask_channel=ask_channel),
             )
 
             if force_new:
@@ -2539,6 +2560,9 @@ class MessageOrchestrator:
             logger.error("Claude file processing failed", error=str(e), user_id=user_id)
         finally:
             heartbeat.cancel()
+            await ask_channel.cancel()
+            if self._active_requests.get(user_id) is doc_request:
+                self._active_requests.pop(user_id, None)
 
     async def agentic_photo(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -2668,6 +2692,14 @@ class MessageOrchestrator:
 
         await self._sync_before_task(update, current_dir)
 
+        ask_channel = AskUserChannel(
+            bot=context.bot,
+            chat_id=chat.id,
+            message_thread_id=update.message.message_thread_id,
+        )
+        media_request = ActiveRequest(user_id=user_id, ask_channel=ask_channel)
+        self._active_requests.setdefault(user_id, media_request)
+
         heartbeat = self._start_typing_heartbeat(chat)
         try:
             claude_response = await claude_integration.run_command(
@@ -2678,10 +2710,13 @@ class MessageOrchestrator:
                 on_stream=on_stream,
                 force_new=force_new,
                 images=images,
-                overrides=self._user_overrides(context),
+                overrides=self._user_overrides(context, ask_channel=ask_channel),
             )
         finally:
             heartbeat.cancel()
+            await ask_channel.cancel()
+            if self._active_requests.get(user_id) is media_request:
+                self._active_requests.pop(user_id, None)
 
         if force_new:
             context.user_data["force_new_session"] = False

@@ -39,6 +39,7 @@ from .exceptions import (
     ClaudeTimeoutError,
 )
 from .monitor import _is_claude_internal_path, check_bash_directory_boundary
+from .system_actions import classify_bash_command, classify_file_write
 
 logger = structlog.get_logger()
 
@@ -196,6 +197,11 @@ FILE_TOOLS = frozenset(
 # Tools whose command the can_use_tool callback checks for directory escapes.
 BASH_TOOLS = frozenset({"Bash", "bash", "shell"})
 
+# Инструменты, которые только читают. Чтение ничего не ломает, поэтому
+# подтверждения у владельца для них не спрашиваются — иначе вопрос
+# прилетал бы на каждый просмотр чужого конфига и терял бы всякий смысл.
+_READING_FILE_TOOLS = frozenset({"Read", "NotebookRead", "read_file"})
+
 # Every tool the callback actually guards. These must be kept out of the
 # ``allowed_tools`` list handed to the SDK: the CLI's permission engine resolves
 # allow rules before consulting the permission prompt tool, so a tool named in
@@ -217,15 +223,41 @@ def _skills_dirs() -> List[Path]:
     return [skills] if skills.is_dir() else []
 
 
+async def _confirm_system_action(ask_channel: Any, reason: str, detail: str) -> bool:
+    """Спросить владельца про системное действие и дождаться ответа.
+
+    Возвращает True, если разрешил. Канал вопросов живёт ровно одну задачу,
+    поэтому «нет ответа за отведённое время» трактуется как отказ: молча
+    сделать системное изменение хуже, чем не сделать ничего.
+    """
+    question = f"Разрешить системное действие?\n\n{reason}"
+    if detail and detail not in reason:
+        question = f"{question}\n\n{detail}"
+
+    try:
+        answer = await ask_channel.ask(question, ["Разрешить", "Отказать"])
+    except Exception as e:  # канал мог закрыться вместе с задачей
+        logger.warning("System action confirmation failed", error=str(e))
+        return False
+
+    return "разреш" in str(answer).lower()
+
+
 def _make_can_use_tool_callback(
-    security_validator: SecurityValidator,
+    security_validator: Optional[SecurityValidator],
     working_directory: Path,
     approved_directory: Path,
+    ask_channel: Any = None,
 ) -> Any:
     """Create a can_use_tool callback for SDK-level tool permission validation.
 
     The callback validates file path boundaries and bash directory boundaries
     *before* the SDK executes the tool, providing preventive security enforcement.
+
+    Когда у бота системные права (``ask_channel`` передан), он дополнительно
+    спрашивает владельца кнопкой в Telegram перед действиями за пределами
+    рабочей папки: службы, ``/etc``, воронка с оплатой, сайт. Отказ и
+    молчание останавливают действие.
     """
 
     async def can_use_tool(
@@ -246,35 +278,83 @@ def _make_can_use_tool_callback(
                 if _is_claude_internal_path(file_path):
                     return PermissionResultAllow()
 
-                valid, _resolved, error = security_validator.validate_path(
-                    file_path, working_directory
-                )
-                if not valid:
-                    logger.warning(
-                        "can_use_tool denied file operation",
-                        tool_name=tool_name,
-                        file_path=file_path,
-                        error=error,
+                if security_validator is not None:
+                    valid, _resolved, error = security_validator.validate_path(
+                        file_path, working_directory
                     )
-                    return PermissionResultDeny(message=error or "Invalid file path")
+                    if not valid:
+                        logger.warning(
+                            "can_use_tool denied file operation",
+                            tool_name=tool_name,
+                            file_path=file_path,
+                            error=error,
+                        )
+                        return PermissionResultDeny(
+                            message=error or "Invalid file path"
+                        )
+
+                # Чтение чужих файлов безопасно; спрашиваем только про запись.
+                if ask_channel is not None and tool_name not in _READING_FILE_TOOLS:
+                    reason = classify_file_write(
+                        file_path, approved_directory, working_directory
+                    )
+                    if reason:
+                        logger.info(
+                            "Asking owner about system file write",
+                            tool_name=tool_name,
+                            file_path=file_path,
+                        )
+                        if not await _confirm_system_action(
+                            ask_channel, reason, f"Инструмент: {tool_name}"
+                        ):
+                            return PermissionResultDeny(
+                                message=(
+                                    "Владелец не разрешил это действие. "
+                                    "Не повторяй его и не ищи обходных путей — "
+                                    "скажи в ответе, что именно не сделано."
+                                )
+                            )
 
         # Bash directory boundary validation
         if tool_name in BASH_TOOLS:
             command = tool_input.get("command", "")
             if command:
-                valid, error = check_bash_directory_boundary(
-                    command, working_directory, approved_directory
-                )
-                if not valid:
-                    logger.warning(
-                        "can_use_tool denied bash command",
-                        tool_name=tool_name,
-                        command=command,
-                        error=error,
+                if security_validator is not None:
+                    valid, error = check_bash_directory_boundary(
+                        command, working_directory, approved_directory
                     )
-                    return PermissionResultDeny(
-                        message=error or "Bash directory boundary violation"
+                    if not valid:
+                        logger.warning(
+                            "can_use_tool denied bash command",
+                            tool_name=tool_name,
+                            command=command,
+                            error=error,
+                        )
+                        return PermissionResultDeny(
+                            message=error or "Bash directory boundary violation"
+                        )
+
+                if ask_channel is not None:
+                    reason = classify_bash_command(
+                        command, working_directory, approved_directory
                     )
+                    if reason:
+                        logger.info(
+                            "Asking owner about system command",
+                            command=command[:200],
+                            reason=reason,
+                        )
+                        shown = command if len(command) <= 500 else command[:500] + "…"
+                        if not await _confirm_system_action(
+                            ask_channel, reason, f"Команда:\n{shown}"
+                        ):
+                            return PermissionResultDeny(
+                                message=(
+                                    "Владелец не разрешил эту команду. "
+                                    "Не повторяй её и не ищи обходных путей — "
+                                    "скажи в ответе, что именно не сделано."
+                                )
+                            )
 
         return PermissionResultAllow()
 
@@ -473,12 +553,17 @@ class ClaudeSDKManager:
                     mcp_config_path=str(self.config.mcp_config_path),
                 )
 
-            # Wire can_use_tool callback for preventive tool validation
-            if self.security_validator:
+            # Wire can_use_tool callback for preventive tool validation.
+            # Канал вопросов ставится даже без валидатора: подтверждения
+            # системных действий — отдельная защита, и терять её вместе с
+            # выключенной проверкой путей нельзя.
+            ask_channel = (overrides or {}).get("ask_channel")
+            if self.security_validator or ask_channel is not None:
                 options.can_use_tool = _make_can_use_tool_callback(
                     security_validator=self.security_validator,
                     working_directory=working_directory,
                     approved_directory=self.config.approved_directory,
+                    ask_channel=ask_channel,
                 )
 
             # Resume previous session if we have a session_id

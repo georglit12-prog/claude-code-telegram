@@ -115,12 +115,16 @@ def _strip_heredocs(command: str) -> str:
     return "\n".join(out_lines)
 
 
-def check_bash_directory_boundary(
-    command: str,
-    working_directory: Path,
-    approved_directory: Path,
-) -> Tuple[bool, Optional[str]]:
-    """Check if a bash command's paths stay within the approved directory."""
+def split_command_chains(command: str) -> Optional[list[list[str]]]:
+    """Разобрать bash-команду на отдельные команды со своими аргументами.
+
+    Возвращает список команд (каждая — список токенов) или ``None``, если
+    разобрать не удалось: тогда вызывающий код должен пропустить команду,
+    а не гадать по неверным токенам.
+
+    Heredoc-блоки вырезаются: их содержимое — данные для stdin (код на
+    Python, JSON), а не команды оболочки.
+    """
     command = _strip_heredocs(command)
 
     # shlex treats newlines as ordinary whitespace, same as spaces, so a
@@ -137,12 +141,12 @@ def check_bash_directory_boundary(
             # Malformed quoting on this line (e.g. an unbalanced quote that
             # continues on the next line). Let it through — the sandbox
             # catches it at the OS level — rather than mis-tokenize it.
-            return True, None
+            return None
         tokens.extend(line_tokens)
         tokens.append("\n")
 
     if not tokens or not any(t != "\n" for t in tokens):
-        return True, None
+        return []
 
     # Split tokens into individual commands based on separators
     command_chains: list[list[str]] = []
@@ -158,6 +162,22 @@ def check_bash_directory_boundary(
 
     if current_chain:
         command_chains.append(current_chain)
+
+    return command_chains
+
+
+def check_bash_directory_boundary(
+    command: str,
+    working_directory: Path,
+    approved_directory: Path,
+) -> Tuple[bool, Optional[str]]:
+    """Check if a bash command's paths stay within the approved directory."""
+    command_chains = split_command_chains(command)
+    if command_chains is None:
+        # Unparseable — the sandbox catches it at the OS level.
+        return True, None
+    if not command_chains:
+        return True, None
 
     resolved_approved = approved_directory.resolve()
 
