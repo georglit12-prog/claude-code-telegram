@@ -51,6 +51,6 @@ async def test_initialize_gives_get_updates_client_a_pool(bot_with_builder):
 
     await bot.initialize()
 
-    builder.get_updates_connection_pool_size.assert_called_once()
-    pool_size = builder.get_updates_connection_pool_size.call_args.args[0]
-    assert pool_size > 1
+    builder.get_updates_request.assert_called_once()
+    request = builder.get_updates_request.call_args.args[0]
+    assert request._client_kwargs["limits"].max_connections > 1

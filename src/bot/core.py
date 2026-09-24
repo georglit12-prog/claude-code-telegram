@@ -9,6 +9,8 @@ Features:
 
 import asyncio
 import os
+import threading
+import time
 from typing import Any, Callable, Dict, Optional
 from urllib.parse import urlparse, urlunparse
 
@@ -25,6 +27,7 @@ from telegram.ext import (
     PicklePersistence,
     filters,
 )
+from telegram.request import HTTPXRequest
 
 from ..config.settings import Settings
 from ..exceptions import ClaudeCodeTelegramError
@@ -32,6 +35,44 @@ from .features.registry import FeatureRegistry
 from .orchestrator import MessageOrchestrator
 
 logger = structlog.get_logger()
+
+# Сколько соединений держит клиент long polling. По умолчанию одно — см.
+# комментарий в initialize().
+GET_UPDATES_POOL_SIZE = 8
+
+# Здоровый опрос получает ответ Telegram минимум раз в ~10 секунд (столько
+# длится один long poll). Если ответа нет три минуты, опрос считается
+# зависшим, и процесс завершается — systemd поднимет его заново.
+POLLING_STALL_SECONDS = 180
+
+# Если мягкое завершение само застрянет, процесс снимается принудительно:
+# сторож, который не может перезапустить бота, бесполезен.
+HARD_EXIT_AFTER_SECONDS = 60
+
+
+class PollingRequest(HTTPXRequest):
+    """HTTP-клиент getUpdates, который помнит, когда Telegram отвечал последний раз.
+
+    Тайм-ауты опроса библиотека повторяет молча (лог уровня debug), поэтому
+    зависший опрос снаружи неотличим от тишины в чате. Время последнего ответа
+    — единственный надёжный признак того, что опрос жив.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.last_answer = time.monotonic()
+
+    async def do_request(self, *args: Any, **kwargs: Any) -> Any:
+        result = await super().do_request(*args, **kwargs)
+        self.last_answer = time.monotonic()
+        return result
+
+
+def _schedule_hard_exit() -> None:
+    """Снять процесс принудительно, если мягкое завершение не уложится в срок."""
+    timer = threading.Timer(HARD_EXIT_AFTER_SECONDS, os._exit, args=(1,))
+    timer.daemon = True
+    timer.start()
 
 
 def _redact_proxy_url(proxy_url: str) -> str:
@@ -64,6 +105,7 @@ class ClaudeCodeBot:
         self.settings = settings
         self.deps = dependencies
         self.app: Optional[Application] = None
+        self.polling_request: Optional[PollingRequest] = None
         self.is_running = False
         self.feature_registry: Optional[FeatureRegistry] = None
         self.orchestrator = MessageOrchestrator(settings, dependencies)
@@ -98,7 +140,15 @@ class ClaudeCodeBot:
         # fails with "Pool timeout: All connections in the connection pool are
         # occupied", permanently, even after the network recovers. A small pool
         # leaves headroom so polling can recover on its own.
-        builder.get_updates_connection_pool_size(8)
+        #
+        # Запаса хватает не всегда: 22.09.2026 после третьего ночного обрыва
+        # VPN подряд опрос заглох насовсем. Поэтому клиент ещё и помнит время
+        # последнего ответа — по нему start() замечает зависание. Прокси этот
+        # клиент, как и раньше, берёт из HTTPS_PROXY.
+        self.polling_request = PollingRequest(
+            connection_pool_size=GET_UPDATES_POOL_SIZE
+        )
+        builder.get_updates_request(self.polling_request)
 
         # Explicitly set proxy from environment variables.
         # This is necessary because python-telegram-bot's Application.builder()
@@ -295,19 +345,43 @@ class ClaudeCodeBot:
                 # Polling mode - initialize and start polling manually
                 await self.app.initialize()
                 await self.app.start()
+                # Сообщения, пришедшие, пока бот лежал, не выбрасываем: после
+                # перезапуска сторожем там может ждать задача владельца.
                 await self.app.updater.start_polling(
                     allowed_updates=Update.ALL_TYPES,
-                    drop_pending_updates=True,
+                    drop_pending_updates=False,
                 )
 
                 # Keep running until manually stopped
                 while self.is_running:
+                    self._check_polling_alive()
                     await asyncio.sleep(1)
         except Exception as e:
             logger.error("Error running bot", error=str(e))
             raise ClaudeCodeTelegramError(f"Failed to start bot: {str(e)}") from e
         finally:
             self.is_running = False
+
+    def _check_polling_alive(self) -> None:
+        """Завершить работу, если Telegram слишком долго не отвечал на опрос.
+
+        Исключение выходит из start(), run_application() гасит остальные
+        части, и процесс завершается — systemd (Restart=always) поднимает бота
+        заново со свежими соединениями.
+        """
+        if self.polling_request is None:
+            return
+        silent_for = time.monotonic() - self.polling_request.last_answer
+        if silent_for < POLLING_STALL_SECONDS:
+            return
+        logger.error(
+            "Telegram polling stalled, restarting bot",
+            silent_seconds=int(silent_for),
+        )
+        _schedule_hard_exit()
+        raise ClaudeCodeTelegramError(
+            f"Telegram polling stalled for {int(silent_for)} seconds"
+        )
 
     async def stop(self) -> None:
         """Gracefully stop the bot."""

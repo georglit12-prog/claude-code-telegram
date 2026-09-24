@@ -359,6 +359,40 @@ class MessageOrchestrator:
             "project_slug": thread_context["project_slug"],
         }
 
+    def _forget_missing_project(
+        self, context: ContextTypes.DEFAULT_TYPE
+    ) -> Optional[str]:
+        """Забыть текущий проект, если его папку удалили, и вернуть его имя.
+
+        Список «📂 Проекты» строится из папок рабочей зоны, а текущий проект
+        хранится в user_data и переживает перезапуски. Без этой проверки бот
+        показывал бы удалённый проект текущим и отдавал бы задачи в пустоту.
+        """
+        base = self.settings.approved_directory
+        current = context.user_data.get("current_directory")
+        if current is None or Path(current) == base or Path(current).is_dir():
+            return None
+        context.user_data["current_directory"] = base
+        context.user_data["claude_session_id"] = None
+        return Path(current).name
+
+    def _project_label(self, context: ContextTypes.DEFAULT_TYPE) -> str:
+        """Имя текущего проекта для шапки или «не выбран»."""
+        self._forget_missing_project(context)
+        current_dir = Path(
+            context.user_data.get("current_directory", self.settings.approved_directory)
+        )
+        if current_dir == self.settings.approved_directory:
+            return "не выбран"
+        return current_dir.name
+
+    @staticmethod
+    def _gone_project_text(name: str) -> str:
+        return (
+            f"📂 Проекта <b>{escape_html(name)}</b> больше нет — его папку "
+            f"удалили.\n\nВыберите, с чем работаем, и повторите задачу:"
+        )
+
     @staticmethod
     def _is_within(path: Path, root: Path) -> bool:
         """Return True if path is within root."""
@@ -1019,14 +1053,7 @@ class MessageOrchestrator:
             )
 
         else:  # BTN_MENU
-            current_dir = context.user_data.get(
-                "current_directory", self.settings.approved_directory
-            )
-            project = (
-                current_dir.name
-                if current_dir != self.settings.approved_directory
-                else "не выбран"
-            )
+            project = self._project_label(context)
             model = (
                 context.user_data.get("claude_model")
                 or self.settings.claude_model
@@ -1177,8 +1204,7 @@ class MessageOrchestrator:
 
         if action == "home":
             await query.answer()
-            current_dir = context.user_data.get("current_directory", self.settings.approved_directory)
-            project = current_dir.name if current_dir != self.settings.approved_directory else "не выбран"
+            project = self._project_label(context)
             await show(
                 self._home_text(project, model, mode_ru.get(mode, mode), effort),
                 self._main_keyboard(),
@@ -1242,8 +1268,7 @@ class MessageOrchestrator:
 
         elif action == "status":
             await query.answer()
-            current_dir = context.user_data.get("current_directory", self.settings.approved_directory)
-            project = current_dir.name if current_dir != self.settings.approved_directory else "не выбран"
+            project = self._project_label(context)
             session = "продолжается" if context.user_data.get("claude_session_id") else "новая"
             await show(
                 f"{self._home_text(project, model, mode_ru.get(mode, mode), effort)}"
@@ -1307,14 +1332,7 @@ class MessageOrchestrator:
 
         elif action == "menu":
             await query.answer()
-            current_dir = context.user_data.get(
-                "current_directory", self.settings.approved_directory
-            )
-            project = (
-                current_dir.name
-                if current_dir != self.settings.approved_directory
-                else "не выбран"
-            )
+            project = self._project_label(context)
             try:
                 await query.message.reply_text(
                     self._home_text(project, model, mode_ru.get(mode, mode), effort),
@@ -1391,7 +1409,7 @@ class MessageOrchestrator:
             "default": "обычный",
             "bypassPermissions": "авто",
         }.get(mode, mode)
-        project = current_dir.name if current_dir != self.settings.approved_directory else "не выбран"
+        project = self._project_label(context)
 
         effort = context.user_data.get("claude_effort") or "xhigh"
 
@@ -1426,14 +1444,7 @@ class MessageOrchestrator:
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Compact one-line status, no buttons."""
-        current_dir = context.user_data.get(
-            "current_directory", self.settings.approved_directory
-        )
-        project = (
-            current_dir.name
-            if current_dir != self.settings.approved_directory
-            else "не выбран"
-        )
+        project = self._project_label(context)
         session_id = context.user_data.get("claude_session_id")
         session_status = "продолжается" if session_id else "новая"
 
@@ -2081,6 +2092,16 @@ class MessageOrchestrator:
                 await update.message.reply_text(f"⏱️ {limit_message}")
                 return
 
+        # Папку текущего проекта удалили — задачу отдавать некуда.
+        gone = self._forget_missing_project(context)
+        if gone:
+            await update.message.reply_text(
+                self._gone_project_text(gone),
+                parse_mode="HTML",
+                reply_markup=self._repos_keyboard(),
+            )
+            return
+
         chat = update.message.chat
         await chat.send_action("typing")
 
@@ -2442,6 +2463,15 @@ class MessageOrchestrator:
             )
             return
 
+        gone = self._forget_missing_project(context)
+        if gone:
+            await progress_msg.edit_text(
+                self._gone_project_text(gone),
+                parse_mode="HTML",
+                reply_markup=self._repos_keyboard(),
+            )
+            return
+
         current_dir = context.user_data.get(
             "current_directory", self.settings.approved_directory
         )
@@ -2669,6 +2699,15 @@ class MessageOrchestrator:
         if not claude_integration:
             await progress_msg.edit_text(
                 "Claude integration not available. Check configuration."
+            )
+            return
+
+        gone = self._forget_missing_project(context)
+        if gone:
+            await progress_msg.edit_text(
+                self._gone_project_text(gone),
+                parse_mode="HTML",
+                reply_markup=self._repos_keyboard(),
             )
             return
 
@@ -3006,6 +3045,17 @@ class MessageOrchestrator:
         # Отдаём Claude как обычную задачу — со стримингом и отчётом в чат.
         await self.agentic_text(update, context, prompt_override=prompt)
 
+        # Проект создан — сразу работаем в нём. В списке «📂 Проекты» он уже
+        # есть: список строится из папок рабочей зоны.
+        if target.is_dir():
+            context.user_data["current_directory"] = target
+            context.user_data["claude_session_id"] = None
+            await update.message.reply_text(
+                f"📂 Открыл проект <b>{escape_html(name)}</b> — он теперь и в "
+                f"списке проектов. Пишите, что делаем.",
+                parse_mode="HTML",
+            )
+
     async def agentic_repo(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
@@ -3132,10 +3182,13 @@ class MessageOrchestrator:
         base = self.settings.approved_directory
         new_path = base / project_name
 
+        # Кнопка из старого списка, а проект с тех пор удалили.
         if not new_path.is_dir():
             await query.edit_message_text(
-                f"Directory not found: <code>{escape_html(project_name)}</code>",
+                f"📂 Проекта <b>{escape_html(project_name)}</b> больше нет.\n\n"
+                f"Выберите, с чем работаем:",
                 parse_mode="HTML",
+                reply_markup=self._repos_keyboard(),
             )
             return
 

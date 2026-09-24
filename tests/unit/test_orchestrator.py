@@ -1036,7 +1036,9 @@ def _sync_update_and_context(agentic_settings, claude_integration):
     update.message.reply_text.return_value = progress_msg
 
     context = MagicMock()
-    context.user_data = {"current_directory": Path(agentic_settings.approved_directory) / "proj"}
+    project_dir = Path(agentic_settings.approved_directory) / "proj"
+    project_dir.mkdir(exist_ok=True)
+    context.user_data = {"current_directory": project_dir}
     context.bot_data = {
         "settings": agentic_settings,
         "claude_integration": claude_integration,
